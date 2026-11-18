@@ -24,7 +24,7 @@ Main menu -> **Creation -> Ship creation**: the Ship Forge.
 | V | first person (from the Commander Post) / commander view |
 | Tab | free cursor, T lock target, X assisted/manual flight, Z brake, Esc pause |
 
-The console is a cockpit-style HUD laid out like the mock-up: Panel 3 (modules) bottom-left, round Panel 4 (radar), Panel 2 (modes) bottom-centre, round Panel 5 (objectives/log), Panel 1 (status gauges) bottom-right. Clicking a mode opens Sub Panel 2 above Panel 2; click the mode again to close it.
+The console is a black-iron and ember-orange command board laid out like the mock-up: Panel 3 (modules, with category tabs) bottom-left, round Panel 4 (radar), Panel 2 (modes) bottom-centre, round Panel 5 (Objectives / Log tabs), Panel 1 (live 3D ship model with Basic 3D / Exploded / Onion tabs, gauges, telemetry) bottom-right. Clicking a mode opens Sub Panel 2 above Panel 2; click it again to close. `UI_SCALE` in `scripts/arena/hud.gd` resizes the whole cluster.
 All 11 modes are listed; modes that depend on unimplemented systems say what they need.
 
 ### Ship editor
