@@ -1,0 +1,1181 @@
+extends Node3D
+## Ship Forge (GDD section 1): timeline of steps Hull -> Modules -> Links -> Interior -> Cosmetics -> Test,
+## permanent stat/legality panel, undo/redo, adaptive snapping and camera for any ship size.
+
+const STEPS := ["Hull", "Modules", "Links", "Interior", "Cosmetics", "Test"]
+const MAPS := [
+	{"name": "Skirmish map (up to Frigate)", "tier": 4},
+	{"name": "Fleet map (up to Cruiser)", "tier": 6},
+	{"name": "Titan sea (all classes)", "tier": 8},
+]
+const NICE := [0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 250.0, 500.0, 1000.0]
+
+var bp: Dictionary
+var step := "Hull"
+var sel_ring := 1
+var sel_vert := -1          # -1 = whole ring
+var sel_mod := -1
+var link_from := -1
+var mirror := true
+var soft := false
+var ring_mode := false
+var snap := 0.25
+var budget := 600.0
+var map_idx := 0
+var undo_stack: Array = []
+var redo_stack: Array = []
+var cam: Camera3D
+var cam_target := Vector3.ZERO
+var cam_yaw := 0.8
+var cam_pitch := -0.4
+var cam_dist := 40.0
+var hull_mi: MeshInstance3D
+var hull_mat: StandardMaterial3D
+var handle_root: Node3D
+var mod_root: Node3D
+var line_mi: MeshInstance3D
+var line_mesh: ImmediateMesh
+var ui: CanvasLayer
+var tools: VBoxContainer
+var stats_lbl: RichTextLabel
+var hint: Label
+var status: Label
+var name_edit: LineEdit
+var pick_ships: OptionButton
+var scope_pick: OptionButton
+var mod_list: ItemList
+var issues: Array = []
+var stats: Dictionary = {}
+var dirty := true
+var dirty_since_save := false
+var orbiting := false
+var panning := false
+var dragging := false
+var drag_start := Vector3.ZERO
+var drag_orig := Vector3.ZERO
+var drag_last := Vector3.ZERO
+var _last_undo_t := -10.0
+var _t := 0.0
+var _size_spins: Array = []
+var _building_ui := false
+var _ship_cache: Array = []
+
+
+func _ready() -> void:
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	_build_world()
+	_build_ui()
+	if Game.editing_bp.is_empty():
+		bp = ShipData.new_blueprint("New Ship")
+	else:
+		bp = Game.editing_bp
+	_after_load()
+
+
+func _after_load() -> void:
+	sel_ring = clampi(sel_ring, 0, bp["rings"].size() - 1)
+	sel_vert = -1
+	sel_mod = -1
+	link_from = -1
+	name_edit.text = bp["name"]
+	_frame_camera()
+	_set_step(step)
+	_changed(false)
+
+
+# ------------------------------------------------------------------ world
+func _build_world() -> void:
+	var env := Environment.new()
+	env.background_mode = Environment.BG_COLOR
+	env.background_color = Color(0.06, 0.07, 0.09)
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	env.ambient_light_color = Color(0.5, 0.52, 0.6)
+	env.ambient_light_energy = 0.7
+	var we := WorldEnvironment.new()
+	we.environment = env
+	add_child(we)
+	var sun := DirectionalLight3D.new()
+	sun.rotation_degrees = Vector3(-40, 30, 0)
+	add_child(sun)
+	cam = Camera3D.new()
+	add_child(cam)
+	hull_mat = StandardMaterial3D.new()
+	hull_mat.metallic = 0.4
+	hull_mat.roughness = 0.5
+	hull_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	hull_mi = MeshInstance3D.new()
+	hull_mi.material_override = hull_mat
+	add_child(hull_mi)
+	handle_root = Node3D.new()
+	add_child(handle_root)
+	mod_root = Node3D.new()
+	add_child(mod_root)
+	line_mesh = ImmediateMesh.new()
+	line_mi = MeshInstance3D.new()
+	line_mi.mesh = line_mesh
+	var lm := StandardMaterial3D.new()
+	lm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	lm.vertex_color_use_as_albedo = true
+	lm.no_depth_test = false
+	line_mi.material_override = lm
+	add_child(line_mi)
+
+
+func _frame_camera() -> void:
+	var b := ShipData.hull_bounds(bp["rings"])
+	cam_target = b.get_center()
+	var longest := maxf(b.size.x, maxf(b.size.y, maxf(b.size.z, 1.0)))
+	cam_dist = longest * 1.15
+	_update_cam()
+
+
+func _update_cam() -> void:
+	var off := Vector3(0, 0, cam_dist).rotated(Vector3.RIGHT, cam_pitch).rotated(Vector3.UP, cam_yaw)
+	cam.look_at_from_position(cam_target + off, cam_target, Vector3.UP)
+	cam.near = maxf(cam_dist * 0.002, 0.01)
+	cam.far = cam_dist * 200.0
+
+
+func _auto_snap() -> void:
+	var b := ShipData.hull_bounds(bp["rings"])
+	var raw := maxf(b.size.x, maxf(b.size.y, b.size.z)) / 80.0
+	snap = NICE[NICE.size() - 1]
+	for n in NICE:
+		if n >= raw:
+			snap = n
+			break
+
+
+# ------------------------------------------------------------------ UI
+func _panel_style() -> StyleBoxFlat:
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.07, 0.09, 0.12, 0.9)
+	sb.border_color = Color(0.3, 0.5, 0.7, 0.8)
+	sb.set_border_width_all(1)
+	sb.set_corner_radius_all(4)
+	sb.content_margin_left = 8
+	sb.content_margin_right = 8
+	sb.content_margin_top = 6
+	sb.content_margin_bottom = 6
+	return sb
+
+
+func _btn(text: String, parent: Control, cb: Callable) -> Button:
+	var b := Button.new()
+	b.text = text
+	b.focus_mode = Control.FOCUS_NONE
+	b.pressed.connect(cb)
+	parent.add_child(b)
+	return b
+
+
+func _lbl(text: String, parent: Control, size := 13) -> Label:
+	var l := Label.new()
+	l.text = text
+	l.add_theme_font_size_override("font_size", size)
+	parent.add_child(l)
+	return l
+
+
+func _build_ui() -> void:
+	ui = CanvasLayer.new()
+	add_child(ui)
+	var root := Control.new()
+	root.set_anchors_preset(Control.PRESET_FULL_RECT)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ui.add_child(root)
+
+	# top bar
+	var top := PanelContainer.new()
+	top.add_theme_stylebox_override("panel", _panel_style())
+	top.anchor_right = 1.0
+	top.offset_left = 6
+	top.offset_right = -6
+	top.offset_top = 6
+	root.add_child(top)
+	var vt := VBoxContainer.new()
+	top.add_child(vt)
+	var row1 := HBoxContainer.new()
+	vt.add_child(row1)
+	_btn("< Menu", row1, func(): Game.editing_bp = {}; Game.goto_scene("res://scenes/main_menu.tscn"))
+	name_edit = LineEdit.new()
+	name_edit.custom_minimum_size = Vector2(160, 0)
+	name_edit.text_changed.connect(func(t: String): bp["name"] = t; dirty_since_save = true)
+	row1.add_child(name_edit)
+	_btn("Save", row1, _save)
+	_btn("Undo", row1, _undo)
+	_btn("Redo", row1, _redo)
+	pick_ships = OptionButton.new()
+	row1.add_child(pick_ships)
+	scope_pick = OptionButton.new()
+	for s in ["Everything", "Hull + modules", "Hull only"]:
+		scope_pick.add_item(s)
+	row1.add_child(scope_pick)
+	_btn("New from prefab", row1, func(): _load_pick(true))
+	_btn("Open", row1, func(): _load_pick(false))
+	_refresh_ship_list()
+	var sp := Control.new()
+	sp.custom_minimum_size = Vector2(24, 0)
+	row1.add_child(sp)
+	for s in STEPS:
+		var ss: String = s
+		_btn(ss, row1, func(): _set_step(ss))
+
+	# left tools
+	var lp := PanelContainer.new()
+	lp.add_theme_stylebox_override("panel", _panel_style())
+	lp.anchor_bottom = 1.0
+	lp.offset_left = 6
+	lp.offset_right = 300
+	lp.offset_top = 70
+	lp.offset_bottom = -34
+	root.add_child(lp)
+	var sc := ScrollContainer.new()
+	lp.add_child(sc)
+	tools = VBoxContainer.new()
+	tools.custom_minimum_size = Vector2(270, 0)
+	tools.add_theme_constant_override("separation", 4)
+	sc.add_child(tools)
+
+	# right stat panel
+	var rp := PanelContainer.new()
+	rp.add_theme_stylebox_override("panel", _panel_style())
+	rp.anchor_left = 1.0
+	rp.anchor_right = 1.0
+	rp.anchor_bottom = 1.0
+	rp.offset_left = -330
+	rp.offset_right = -6
+	rp.offset_top = 70
+	rp.offset_bottom = -34
+	root.add_child(rp)
+	var rv := VBoxContainer.new()
+	rp.add_child(rv)
+	var maprow := HBoxContainer.new()
+	rv.add_child(maprow)
+	var mp := OptionButton.new()
+	for m in MAPS:
+		mp.add_item(m["name"])
+	mp.item_selected.connect(func(i: int): map_idx = i; _changed(false))
+	maprow.add_child(mp)
+	_lbl("pts", maprow)
+	var bsp := SpinBox.new()
+	bsp.min_value = 50
+	bsp.max_value = 100000
+	bsp.value = budget
+	bsp.step = 50
+	bsp.value_changed.connect(func(v: float): budget = v; _changed(false))
+	maprow.add_child(bsp)
+	stats_lbl = RichTextLabel.new()
+	stats_lbl.bbcode_enabled = true
+	stats_lbl.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	stats_lbl.add_theme_font_size_override("normal_font_size", 13)
+	rv.add_child(stats_lbl)
+
+	# bottom bar
+	hint = Label.new()
+	hint.anchor_top = 1.0
+	hint.anchor_bottom = 1.0
+	hint.anchor_right = 1.0
+	hint.offset_top = -30
+	hint.offset_left = 310
+	hint.offset_right = -340
+	hint.add_theme_font_size_override("font_size", 12)
+	hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(hint)
+	status = Label.new()
+	status.anchor_top = 1.0
+	status.anchor_bottom = 1.0
+	status.offset_top = -30
+	status.offset_left = 10
+	status.add_theme_color_override("font_color", Color(1, 0.9, 0.5))
+	status.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(status)
+
+
+func say(t: String) -> void:
+	status.text = t
+
+
+func _refresh_ship_list() -> void:
+	pick_ships.clear()
+	_ship_cache = Game.all_ships()
+	for s in _ship_cache:
+		pick_ships.add_item("%s (%s)" % [s["name"], s["source"]])
+
+
+func _load_pick(as_prefab: bool) -> void:
+	if pick_ships.selected < 0 or pick_ships.selected >= _ship_cache.size():
+		return
+	_push_undo()
+	var src: Dictionary = (_ship_cache[pick_ships.selected]["bp"] as Dictionary).duplicate(true)
+	if as_prefab:
+		src["name"] = String(src["name"]) + " copy"
+		src["author"] = ""
+		var scope := scope_pick.selected
+		if scope >= 1:
+			if scope == 2:
+				src["modules"] = []
+			src["links"] = []
+		if scope == 1:
+			src["links"] = []
+	bp = ShipData.normalize(src)
+	_after_load()
+	say("Loaded %s" % bp["name"])
+
+
+func _save() -> void:
+	if not issues.is_empty():
+		say("Cannot save: the ship must be fully legal (see the red items).")
+		return
+	var path := Game.save_ship(bp)
+	if path == "":
+		say("Save failed")
+		return
+	dirty_since_save = false
+	_refresh_ship_list()
+	say("Saved to %s" % ProjectSettings.globalize_path(path))
+
+
+func _set_step(s: String) -> void:
+	step = s
+	link_from = -1
+	_build_tools()
+	var hints := {
+		"Hull": "LMB on a vertex: select/drag (mirror keeps symmetry). Arrows = X/Y, PageUp/PageDown = ring Z. RMB orbit, MMB/Shift+RMB pan, wheel zoom. Ctrl+Z undo.",
+		"Modules": "LMB a module to select and drag it (camera plane). Arrows/PageUp/PageDown nudge. Red outline = minimum size. White line = facing.",
+		"Links": "LMB module A, then module B to link (Commander Post -> Engine/Turret/Radar, Engine -> Thruster, Turret -> Barrel).",
+		"Interior": "Corridors, doors, stairs and ladders belong to roadmap step 6 and are not in this prototype.",
+		"Cosmetics": "Colors only in this prototype. Stowage props and decals: later roadmap.",
+		"Test": "Launch the solo test range: place a dummy, shoot your own hull, test flight.",
+	}
+	hint.text = hints[s]
+	_changed(false)
+
+
+func _build_tools() -> void:
+	_building_ui = true
+	for c in tools.get_children():
+		c.queue_free()
+	_size_spins.clear()
+	_lbl("STEP: " + step.to_upper(), tools, 15).add_theme_color_override("font_color", Color(0.5, 0.85, 1.0))
+	match step:
+		"Hull":
+			_tools_hull()
+		"Modules":
+			_tools_modules()
+		"Links":
+			_tools_links()
+		"Interior":
+			_lbl("Not in this prototype.\n\nPlanned: entrances on internal modules,\ncorridors with bend points, doors,\nauto slope -> stairs -> ladder.", tools)
+		"Cosmetics":
+			_tools_cosmetics()
+		"Test":
+			_tools_test()
+	_building_ui = false
+
+
+func _tools_hull() -> void:
+	var ck := CheckButton.new()
+	ck.text = "Mirror symmetry (X)"
+	ck.button_pressed = mirror
+	ck.focus_mode = Control.FOCUS_NONE
+	ck.toggled.connect(func(on: bool): mirror = on)
+	tools.add_child(ck)
+	var cs := CheckButton.new()
+	cs.text = "Soft selection (proportional)"
+	cs.button_pressed = soft
+	cs.focus_mode = Control.FOCUS_NONE
+	cs.toggled.connect(func(on: bool): soft = on)
+	tools.add_child(cs)
+	var cr := CheckButton.new()
+	cr.text = "Select whole ring"
+	cr.button_pressed = ring_mode
+	cr.focus_mode = Control.FOCUS_NONE
+	cr.toggled.connect(func(on: bool): ring_mode = on; sel_vert = -1; _changed(false))
+	tools.add_child(cr)
+	var rr := HBoxContainer.new()
+	tools.add_child(rr)
+	_btn("< Ring", rr, func(): sel_ring = maxi(sel_ring - 1, 0); sel_vert = -1; _changed(false))
+	_btn("Ring >", rr, func(): sel_ring = mini(sel_ring + 1, bp["rings"].size() - 1); sel_vert = -1; _changed(false))
+	_btn("Loop cut (after ring)", tools, _loop_cut)
+	var ex := HBoxContainer.new()
+	tools.add_child(ex)
+	_btn("Extrude nose", ex, func(): _extrude(true))
+	_btn("Extrude tail", ex, func(): _extrude(false))
+	_btn("Delete ring", tools, _delete_ring)
+	_lbl("Ring tools (selected ring)", tools, 12)
+	var sr := HBoxContainer.new()
+	tools.add_child(sr)
+	_btn("Scale +10%", sr, func(): _scale_ring(1.1, 1.1))
+	_btn("Scale -10%", sr, func(): _scale_ring(0.9, 0.9))
+	var wr := HBoxContainer.new()
+	tools.add_child(wr)
+	_btn("Wider", wr, func(): _scale_ring(1.1, 1.0))
+	_btn("Narrower", wr, func(): _scale_ring(0.9, 1.0))
+	_btn("Taller", wr, func(): _scale_ring(1.0, 1.1))
+	_btn("Flatter", wr, func(): _scale_ring(1.0, 0.9))
+	_btn("Round (fillet) ring", tools, _round_ring)
+	_lbl("Whole hull", tools, 12)
+	var sh := HBoxContainer.new()
+	tools.add_child(sh)
+	_btn("Scale x1.1", sh, func(): _scale_hull(1.1))
+	_btn("Scale x0.9", sh, func(): _scale_hull(0.9))
+	_btn("Frame view", sh, _frame_camera)
+	var tr := HBoxContainer.new()
+	tools.add_child(tr)
+	_lbl("Thickness (m)", tr, 12)
+	var ts := HSlider.new()
+	ts.min_value = 0.02
+	ts.max_value = 1.5
+	ts.step = 0.01
+	ts.value = float(bp["thickness"])
+	ts.custom_minimum_size = Vector2(130, 18)
+	ts.value_changed.connect(func(v: float): if not _building_ui: _push_undo(); bp["thickness"] = v; _changed())
+	tr.add_child(ts)
+	_lbl("Thicker armor = tougher but heavier and\nmore expensive.", tools, 11)
+
+
+func _tools_modules() -> void:
+	var tr := HBoxContainer.new()
+	tools.add_child(tr)
+	var tp := OptionButton.new()
+	var types: Array = ShipData.MODULES.keys()
+	for t in types:
+		tp.add_item(ShipData.MODULES[t]["label"])
+	tr.add_child(tp)
+	_btn("Add", tr, func(): _add_module(types[tp.selected]))
+	mod_list = ItemList.new()
+	mod_list.custom_minimum_size = Vector2(250, 190)
+	mod_list.item_selected.connect(func(i: int): sel_mod = int(mod_list.get_item_metadata(i)); _build_tools(); _changed(false))
+	tools.add_child(mod_list)
+	_fill_mod_list()
+	if sel_mod < 0 or ShipData.get_module(bp, sel_mod).is_empty():
+		_lbl("Select a module (list or click in 3D).", tools, 12)
+		return
+	var m := ShipData.get_module(bp, sel_mod)
+	var def: Dictionary = ShipData.MODULES[m["type"]]
+	_lbl("%s #%d  (%s)" % [def["label"], m["id"], def["kind"]], tools, 13)
+	var mn: Vector3 = def["min"]
+	_lbl("Minimum size: %.2f x %.2f x %.2f m" % [mn.x, mn.y, mn.z], tools, 11)
+	var sz := ShipData.v3(m["size"])
+	for ax in 3:
+		var hb := HBoxContainer.new()
+		tools.add_child(hb)
+		_lbl(["Size X", "Size Y", "Size Z"][ax], hb, 12)
+		var spn := SpinBox.new()
+		spn.min_value = mn[ax]
+		spn.max_value = 100000.0
+		spn.step = snap
+		spn.set_value_no_signal(sz[ax])
+		var axx := ax
+		spn.value_changed.connect(func(v: float): _set_size(axx, v))
+		hb.add_child(spn)
+	var dr := HBoxContainer.new()
+	tools.add_child(dr)
+	_lbl("Facing", dr, 12)
+	var dp := OptionButton.new()
+	for n in ShipData.DIR_NAMES:
+		dp.add_item(n)
+	dp.select(int(m["dir"]))
+	dp.item_selected.connect(func(i: int): _push_undo(); m["dir"] = i; _changed())
+	dr.add_child(dp)
+	if m["type"] == "barrel":
+		var wr := HBoxContainer.new()
+		tools.add_child(wr)
+		_lbl("Weapon", wr, 12)
+		var wp := OptionButton.new()
+		for w in ShipData.WEAPONS:
+			wp.add_item(w)
+		wp.select(ShipData.WEAPONS.find(m["weapon"]))
+		wp.item_selected.connect(func(i: int): _push_undo(); m["weapon"] = ShipData.WEAPONS[i]; _changed())
+		wr.add_child(wp)
+		var ws := ShipData.weapon_stats(m)
+		_lbl("dmg %.0f  pen %.2f  rate %.1f/s  power %.1f MW" % [ws["damage"], ws["pen"], 1.0 / float(ws["interval"]), ws["power"]], tools, 11)
+	var ms := ShipData.module_stats(m)
+	_lbl("HP %.0f   mass %.1f t   cost %.1f pts" % [ms["hp"], ms["mass"], ms["cost"]], tools, 11)
+	var br := HBoxContainer.new()
+	tools.add_child(br)
+	_btn("Duplicate", br, func(): _duplicate_module(false))
+	_btn("Mirror copy", br, func(): _duplicate_module(true))
+	_btn("Delete", br, _delete_module)
+
+
+func _fill_mod_list() -> void:
+	mod_list.clear()
+	for m in bp["modules"]:
+		var i := mod_list.add_item("%s #%d" % [ShipData.MODULES[m["type"]]["label"], m["id"]])
+		mod_list.set_item_metadata(i, int(m["id"]))
+		if int(m["id"]) == sel_mod:
+			mod_list.select(i)
+
+
+func _tools_links() -> void:
+	_btn("Auto-link everything", tools, func(): _push_undo(); ShipData.auto_link(bp); _changed(); _build_tools())
+	_btn("Clear all links", tools, func(): _push_undo(); bp["links"] = []; _changed(); _build_tools())
+	_lbl("Links (click to remove):", tools, 12)
+	for l in bp["links"]:
+		var a := ShipData.get_module(bp, int(l[0]))
+		var b := ShipData.get_module(bp, int(l[1]))
+		if a.is_empty() or b.is_empty():
+			continue
+		var la := int(l[0])
+		var lb := int(l[1])
+		_btn("%s #%d  ->  %s #%d" % [ShipData.MODULES[a["type"]]["label"], la, ShipData.MODULES[b["type"]]["label"], lb], tools, func(): _push_undo(); ShipData.remove_link(bp, la, lb); _changed(); _build_tools())
+
+
+func _tools_cosmetics() -> void:
+	for pair in [["Hull paint", "color"], ["Accent paint", "accent"]]:
+		var hb := HBoxContainer.new()
+		tools.add_child(hb)
+		_lbl(pair[0], hb, 13)
+		var cp := ColorPickerButton.new()
+		cp.custom_minimum_size = Vector2(80, 26)
+		cp.color = ShipData.col(bp[pair[1]])
+		var key: String = pair[1]
+		cp.color_changed.connect(func(c: Color): bp[key] = [c.r, c.g, c.b]; _changed())
+		hb.add_child(cp)
+	_lbl("Camo, wear and decals: later.", tools, 11)
+
+
+func _tools_test() -> void:
+	_lbl("Solo test range (like War Thunder):\nplace a dummy ship, test flight, turrets,\nand fire a chosen round at your own hull.", tools, 12)
+	var b := _btn("Launch test range", tools, _launch_test)
+	b.disabled = not issues.is_empty()
+	if not issues.is_empty():
+		_lbl("Fix the red items first - the ship\nmust be playable.", tools, 12).add_theme_color_override("font_color", Color(1, 0.5, 0.4))
+
+
+func _launch_test() -> void:
+	if not issues.is_empty():
+		return
+	Game.editing_bp = bp
+	Game.session = {"mode": "sandbox", "ship": bp.duplicate(true), "return_scene": "res://scenes/ship_editor.tscn"}
+	Game.save_ship(bp, Game.DRAFTS)
+	Game.goto_scene("res://scenes/arena.tscn")
+
+
+# ------------------------------------------------------------------ undo / change tracking
+func _push_undo() -> void:
+	undo_stack.append(bp.duplicate(true))
+	if undo_stack.size() > 80:
+		undo_stack.pop_front()
+	redo_stack.clear()
+	_last_undo_t = _t
+
+
+func _undo() -> void:
+	if undo_stack.is_empty():
+		return
+	redo_stack.append(bp.duplicate(true))
+	bp = undo_stack.pop_back()
+	Game.editing_bp = bp
+	name_edit.text = bp["name"]
+	sel_ring = clampi(sel_ring, 0, bp["rings"].size() - 1)
+	_build_tools()
+	_changed(false)
+
+
+func _redo() -> void:
+	if redo_stack.is_empty():
+		return
+	undo_stack.append(bp.duplicate(true))
+	bp = redo_stack.pop_back()
+	Game.editing_bp = bp
+	name_edit.text = bp["name"]
+	sel_ring = clampi(sel_ring, 0, bp["rings"].size() - 1)
+	_build_tools()
+	_changed(false)
+
+
+func _changed(mark := true) -> void:
+	dirty = true
+	if mark:
+		dirty_since_save = true
+	Game.editing_bp = bp
+
+
+# ------------------------------------------------------------------ hull editing
+func _ring(i: int) -> Dictionary:
+	return bp["rings"][i]
+
+
+func _set_vert(r: int, i: int, x: float, y: float) -> void:
+	var ring := _ring(r)
+	if mirror and (i == 0 or i == 4):
+		x = 0.0
+	ring["pts"][i] = [x, y]
+	if mirror:
+		var j := ShipData.mirror_idx(i)
+		if j != i:
+			ring["pts"][j] = [-x, y]
+
+
+func _move_vertex_by(r: int, i: int, dx: float, dy: float) -> void:
+	var p: Array = _ring(r)["pts"][i]
+	_set_vert(r, i, float(p[0]) + dx, float(p[1]) + dy)
+	if soft:
+		for off in [1, 2]:
+			var w := 0.5 if off == 1 else 0.2
+			for rr in [r - off, r + off]:
+				if rr >= 0 and rr < bp["rings"].size():
+					var q: Array = _ring(rr)["pts"][i]
+					_set_vert(rr, i, float(q[0]) + dx * w, float(q[1]) + dy * w)
+
+
+func _move_ring_by(r: int, dx: float, dy: float) -> void:
+	if mirror:
+		dx = 0.0
+	for p in _ring(r)["pts"]:
+		p[0] = float(p[0]) + dx
+		p[1] = float(p[1]) + dy
+
+
+func _move_ring_z(r: int, dz: float) -> void:
+	var rings: Array = bp["rings"]
+	var z := float(_ring(r)["z"]) + dz
+	if r > 0:
+		z = maxf(z, float(rings[r - 1]["z"]) + ShipData.MIN_RING_GAP)
+	if r < rings.size() - 1:
+		z = minf(z, float(rings[r + 1]["z"]) - ShipData.MIN_RING_GAP)
+	_ring(r)["z"] = z
+
+
+func _loop_cut() -> void:
+	var rings: Array = bp["rings"]
+	if sel_ring >= rings.size() - 1:
+		_extrude(false)
+		return
+	_push_undo()
+	var a := _ring(sel_ring)
+	var b := _ring(sel_ring + 1)
+	var pts: Array = []
+	for i in ShipData.RING_PTS:
+		pts.append([(float(a["pts"][i][0]) + float(b["pts"][i][0])) * 0.5, (float(a["pts"][i][1]) + float(b["pts"][i][1])) * 0.5])
+	rings.insert(sel_ring + 1, {"z": (float(a["z"]) + float(b["z"])) * 0.5, "pts": pts})
+	sel_ring += 1
+	_changed()
+
+
+func _extrude(nose: bool) -> void:
+	_push_undo()
+	var rings: Array = bp["rings"]
+	var b := ShipData.hull_bounds(rings)
+	var d := maxf(snap * 8.0, b.size.z * 0.1)
+	var src: Dictionary = rings[0] if nose else rings[rings.size() - 1]
+	var nr: Dictionary = src.duplicate(true)
+	nr["z"] = float(src["z"]) + (-d if nose else d)
+	if nose:
+		rings.insert(0, nr)
+		sel_ring = 0
+	else:
+		rings.append(nr)
+		sel_ring = rings.size() - 1
+	_changed()
+
+
+func _delete_ring() -> void:
+	if bp["rings"].size() <= 2:
+		say("A hull needs at least 2 rings.")
+		return
+	_push_undo()
+	bp["rings"].remove_at(sel_ring)
+	sel_ring = clampi(sel_ring, 0, bp["rings"].size() - 1)
+	sel_vert = -1
+	_changed()
+
+
+func _scale_ring(sx: float, sy: float) -> void:
+	_push_undo()
+	var c := ShipData.ring_center(_ring(sel_ring))
+	for p in _ring(sel_ring)["pts"]:
+		p[0] = c.x + (float(p[0]) - c.x) * sx
+		p[1] = c.y + (float(p[1]) - c.y) * sy
+	_changed()
+
+
+func _round_ring() -> void:
+	_push_undo()
+	var r := _ring(sel_ring)
+	var w := 0.0
+	var h := 0.0
+	for p in r["pts"]:
+		w = maxf(w, absf(float(p[0])))
+		h = maxf(h, absf(float(p[1])))
+	var t := ShipData.make_ring(float(r["z"]), w, h)
+	for i in ShipData.RING_PTS:
+		r["pts"][i] = t["pts"][i]
+	_changed()
+
+
+func _scale_hull(s: float) -> void:
+	_push_undo()
+	ShipData.scale_ship(bp, s, false)
+	_changed()
+	_frame_camera()
+
+
+# ------------------------------------------------------------------ module editing
+func _add_module(type: String) -> void:
+	_push_undo()
+	var b := ShipData.hull_bounds(bp["rings"])
+	var c := b.get_center()
+	var def: Dictionary = ShipData.MODULES[type]
+	var size: Vector3 = (def["min"] as Vector3) * 1.25
+	var pos := c
+	match type:
+		"thruster":
+			pos = Vector3(0, 0, b.end.z - size.z * 0.35)
+		"commander_post":
+			pos = Vector3(0, 0, b.position.z - size.z * 0.1)
+		"barrel":
+			pos = Vector3(0, 0, b.position.z)
+	sel_mod = ShipData.add_module(bp, type, pos, size, 0, "kinetic")
+	_changed()
+	_build_tools()
+
+
+func _set_size(ax: int, v: float) -> void:
+	if _building_ui or sel_mod < 0:
+		return
+	var m := ShipData.get_module(bp, sel_mod)
+	if m.is_empty():
+		return
+	_push_undo()
+	var s := ShipData.v3(m["size"])
+	s[ax] = maxf(v, (ShipData.MODULES[m["type"]]["min"] as Vector3)[ax])
+	m["size"] = ShipData.a3(s)
+	_changed()
+
+
+func _duplicate_module(mirrored: bool) -> void:
+	var m := ShipData.get_module(bp, sel_mod)
+	if m.is_empty():
+		return
+	_push_undo()
+	if mirrored:
+		if absf(ShipData.v3(m["pos"]).x) < 0.01:
+			say("Move the module off the centre line first.")
+			return
+		sel_mod = ShipData.mirrored_copy(bp, sel_mod)
+	else:
+		sel_mod = ShipData.add_module(bp, m["type"], ShipData.v3(m["pos"]) + Vector3(snap * 4.0, 0, 0), ShipData.v3(m["size"]), int(m["dir"]), m["weapon"])
+	_changed()
+	_build_tools()
+
+
+func _delete_module() -> void:
+	if sel_mod < 0:
+		return
+	_push_undo()
+	ShipData.remove_module(bp, sel_mod)
+	sel_mod = -1
+	_changed()
+	_build_tools()
+
+
+# ------------------------------------------------------------------ rebuild visuals
+func _process(delta: float) -> void:
+	_t += delta
+	_update_cam()
+	if dirty:
+		dirty = false
+		_rebuild()
+	if dirty_since_save and fmod(_t, 4.0) < delta:
+		Game.save_ship(bp, Game.DRAFTS)
+
+
+func _rebuild() -> void:
+	_auto_snap()
+	var rings: Array = bp["rings"]
+	hull_mi.mesh = ShipData.build_hull_mesh(rings)
+	var c := ShipData.col(bp["color"])
+	hull_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	c.a = 1.0 if step == "Cosmetics" else (0.7 if step == "Hull" else 0.28)
+	hull_mat.albedo_color = c
+	stats = ShipData.compute_stats(bp)
+	issues = ShipData.validate(bp, {"max_tier": MAPS[map_idx]["tier"], "budget": budget})
+	_rebuild_handles()
+	_rebuild_modules()
+	_rebuild_lines()
+	_update_stats()
+	if mod_list != null and is_instance_valid(mod_list) and step == "Modules":
+		_fill_mod_list()
+
+
+func _rebuild_handles() -> void:
+	for c in handle_root.get_children():
+		c.queue_free()
+	if step != "Hull":
+		return
+	var hs := maxf(float(stats["longest"]) * 0.009, 0.05)
+	var sm := SphereMesh.new()
+	sm.radius = hs
+	sm.height = hs * 2.0
+	sm.radial_segments = 8
+	sm.rings = 4
+	var rings: Array = bp["rings"]
+	for r in range(rings.size()):
+		for i in ShipData.RING_PTS:
+			var mi := MeshInstance3D.new()
+			mi.mesh = sm
+			var mat := StandardMaterial3D.new()
+			mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+			mat.no_depth_test = true
+			var col := Color(0.85, 0.85, 0.9)
+			if r == sel_ring:
+				col = Color(1.0, 0.6, 0.2)
+				if sel_vert == i:
+					col = Color(1.0, 1.0, 0.2)
+				elif sel_vert >= 0 and mirror and ShipData.mirror_idx(sel_vert) == i:
+					col = Color(0.3, 1.0, 1.0)
+			mat.albedo_color = col
+			mi.material_override = mat
+			mi.position = ShipData.ring_vertex(rings[r], i)
+			handle_root.add_child(mi)
+
+
+func _type_color(t: String) -> Color:
+	return ShipData.MODULES[t]["color"]
+
+
+func _rebuild_modules() -> void:
+	for c in mod_root.get_children():
+		c.queue_free()
+	if step == "Hull" or step == "Cosmetics" or step == "Interior":
+		return
+	var bad := {}
+	for i in issues:
+		if int(i["mod"]) >= 0:
+			bad[int(i["mod"])] = true
+	for m in bp["modules"]:
+		var mi := MeshInstance3D.new()
+		var bm := BoxMesh.new()
+		bm.size = ShipData.v3(m["size"])
+		mi.mesh = bm
+		var mat := StandardMaterial3D.new()
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		var col := _type_color(m["type"])
+		if bad.has(int(m["id"])):
+			col = col.lerp(Color(1, 0.1, 0.1), 0.6)
+		col.a = 0.75 if int(m["id"]) == sel_mod or int(m["id"]) == link_from else 0.5
+		mat.albedo_color = col
+		mi.material_override = mat
+		mi.position = ShipData.v3(m["pos"])
+		mod_root.add_child(mi)
+
+
+func _line(a: Vector3, b: Vector3, col: Color) -> void:
+	line_mesh.surface_set_color(col)
+	line_mesh.surface_add_vertex(a)
+	line_mesh.surface_set_color(col)
+	line_mesh.surface_add_vertex(b)
+
+
+func _box_lines(center: Vector3, size: Vector3, col: Color) -> void:
+	var h := size * 0.5
+	var c: Array = []
+	for x in [-1, 1]:
+		for y in [-1, 1]:
+			for z in [-1, 1]:
+				c.append(center + Vector3(x * h.x, y * h.y, z * h.z))
+	for i in 8:
+		for j in range(i + 1, 8):
+			var d := (c[i] as Vector3) - (c[j] as Vector3)
+			if (absf(d.x) > 0.0001 and absf(d.y) < 0.0001 and absf(d.z) < 0.0001) or (absf(d.y) > 0.0001 and absf(d.x) < 0.0001 and absf(d.z) < 0.0001) or (absf(d.z) > 0.0001 and absf(d.x) < 0.0001 and absf(d.y) < 0.0001):
+				_line(c[i], c[j], col)
+
+
+func _rebuild_lines() -> void:
+	line_mesh.clear_surfaces()
+	line_mesh.surface_begin(Mesh.PRIMITIVE_LINES)
+	var rings: Array = bp["rings"]
+	var L := float(stats["longest"])
+	if step == "Hull":
+		for r in range(rings.size()):
+			var col := Color(1.0, 0.6, 0.2) if r == sel_ring else Color(0.5, 0.55, 0.65)
+			for i in ShipData.RING_PTS:
+				_line(ShipData.ring_vertex(rings[r], i), ShipData.ring_vertex(rings[r], (i + 1) % ShipData.RING_PTS), col)
+			if r < rings.size() - 1:
+				for i in ShipData.RING_PTS:
+					_line(ShipData.ring_vertex(rings[r], i), ShipData.ring_vertex(rings[r + 1], i), Color(0.35, 0.4, 0.5))
+		var b := ShipData.hull_bounds(rings)
+		var hy := b.size.y * 0.8
+		var z0 := b.position.z - L * 0.05
+		var z1 := b.end.z + L * 0.05
+		var mc := Color(0.4, 0.9, 1.0, 0.6) if mirror else Color(0.3, 0.3, 0.3)
+		_line(Vector3(0, -hy, z0), Vector3(0, hy, z0), mc)
+		_line(Vector3(0, hy, z0), Vector3(0, hy, z1), mc)
+		_line(Vector3(0, hy, z1), Vector3(0, -hy, z1), mc)
+		_line(Vector3(0, -hy, z1), Vector3(0, -hy, z0), mc)
+	_line(Vector3.ZERO, Vector3(L * 0.15, 0, 0), Color.RED)
+	_line(Vector3.ZERO, Vector3(0, L * 0.15, 0), Color.GREEN)
+	_line(Vector3.ZERO, Vector3(0, 0, -L * 0.15), Color(0.4, 0.5, 1.0))
+	if step in ["Modules", "Links"]:
+		for m in bp["modules"]:
+			var p := ShipData.v3(m["pos"])
+			var dv: Vector3 = ShipData.DIRS[int(m["dir"])]
+			var half := ShipData.v3(m["size"])[ShipData.DIR_AXIS[int(m["dir"])]] * 0.5
+			_line(p, p + dv * (half + L * 0.03), Color.WHITE)
+		for l in bp["links"]:
+			var a := ShipData.get_module(bp, int(l[0]))
+			var b2 := ShipData.get_module(bp, int(l[1]))
+			if not a.is_empty() and not b2.is_empty():
+				_line(ShipData.v3(a["pos"]), ShipData.v3(b2["pos"]), Color(1.0, 0.9, 0.3))
+		if sel_mod >= 0:
+			var m := ShipData.get_module(bp, sel_mod)
+			if not m.is_empty():
+				var p := ShipData.v3(m["pos"])
+				_box_lines(p, ShipData.v3(m["size"]), Color(1, 1, 0.2))
+				_box_lines(p, ShipData.MODULES[m["type"]]["min"], Color(1, 0.15, 0.15))
+	line_mesh.surface_end()
+
+
+func _update_stats() -> void:
+	var st := stats
+	var ok := issues.is_empty()
+	var t := "[b]%s[/b]  -  [color=#8cf]%s[/color] (tier %d)\n" % [bp["name"], st["class"], st["tier"]]
+	t += "Size  %.1f x %.1f x %.1f m  (snap %.2f m)\n" % [st["length"], st["beam"], st["height"], snap]
+	t += "Mass  %.1f t   Hull armor %.2f\n" % [st["mass"], st["armor"]]
+	var cost_ok := float(st["cost"]) <= budget
+	t += "Cost  [color=%s]%.0f[/color] / %.0f pts\n" % ["#6f6" if cost_ok else "#f66", st["cost"], budget]
+	var pwr_ok := float(st["power_idle"]) <= float(st["power_out"])
+	t += "Power [color=%s]%.0f MW out, %.0f idle, %.0f peak[/color]\n" % ["#6f6" if pwr_ok else "#f66", st["power_out"], st["power_idle"], st["power_peak"]]
+	t += "Accel fwd %.1f m/s2   RCS %.0f kN   gyro %.2f rad/s2\n" % [st["accel_fwd"], st["rcs"], st["gyro"]]
+	var tri_ok := int(st["tris"]) <= int(st["tri_budget"])
+	t += "Polys [color=%s]%d / %d[/color]\n\n" % ["#6f6" if tri_ok else "#f66", st["tris"], st["tri_budget"]]
+	if ok:
+		t += "[color=#6f6][b]LEGAL[/b] - playable, can be saved[/color]"
+	else:
+		t += "[color=#f66][b]NOT LEGAL[/b][/color]\n"
+		for i in issues:
+			t += "[color=#f88]- %s[/color]\n" % i["msg"]
+	stats_lbl.text = t
+
+
+# ------------------------------------------------------------------ input
+func _ray() -> Array:
+	var mp := get_viewport().get_mouse_position()
+	return [cam.project_ray_origin(mp), cam.project_ray_normal(mp)]
+
+
+func _pick_handle() -> Vector2i:
+	var mp := get_viewport().get_mouse_position()
+	var best := Vector2i(-1, -1)
+	var bd := 14.0
+	var rings: Array = bp["rings"]
+	for r in range(rings.size()):
+		for i in ShipData.RING_PTS:
+			var wp := ShipData.ring_vertex(rings[r], i)
+			if cam.is_position_behind(wp):
+				continue
+			var d := cam.unproject_position(wp).distance_to(mp)
+			if d < bd:
+				bd = d
+				best = Vector2i(r, i)
+	return best
+
+
+func _pick_module() -> int:
+	var rr := _ray()
+	var best := -1
+	var bd := INF
+	for m in bp["modules"]:
+		var h = ShipData.module_box(m).intersects_ray(rr[0], rr[1])
+		if h != null:
+			var d: float = (rr[0] as Vector3).distance_to(h)
+			if d < bd:
+				bd = d
+				best = int(m["id"])
+	return best
+
+
+func _drag_hit() -> Variant:
+	var rr := _ray()
+	var o: Vector3 = rr[0]
+	var d: Vector3 = rr[1]
+	if step == "Hull":
+		if absf(d.z) < 0.12:
+			return null
+		var plane := Plane(Vector3(0, 0, 1), float(_ring(sel_ring)["z"]))
+		return plane.intersects_ray(o, d)
+	var m := ShipData.get_module(bp, sel_mod)
+	if m.is_empty():
+		return null
+	var fwd := -cam.global_transform.basis.z
+	var plane2 := Plane(fwd, ShipData.v3(m["pos"]).dot(fwd))
+	return plane2.intersects_ray(o, d)
+
+
+func _snapv(v: float) -> float:
+	return roundf(v / snap) * snap
+
+
+func _input(event: InputEvent) -> void:
+	if event is InputEventMouseButton and not event.pressed:
+		if event.button_index == MOUSE_BUTTON_LEFT:
+			dragging = false
+		elif event.button_index == MOUSE_BUTTON_RIGHT:
+			orbiting = false
+			panning = false
+		elif event.button_index == MOUSE_BUTTON_MIDDLE:
+			panning = false
+	elif event is InputEventMouseMotion:
+		if orbiting:
+			if Input.is_key_pressed(KEY_SHIFT):
+				panning = true
+			if panning or Input.is_mouse_button_pressed(MOUSE_BUTTON_MIDDLE):
+				var right := cam.global_transform.basis.x
+				var up := cam.global_transform.basis.y
+				cam_target += (-right * event.relative.x + up * event.relative.y) * cam_dist * 0.0016
+			else:
+				cam_yaw -= event.relative.x * 0.006
+				cam_pitch = clampf(cam_pitch - event.relative.y * 0.006, -1.5, 1.5)
+		elif panning:
+			var right2 := cam.global_transform.basis.x
+			var up2 := cam.global_transform.basis.y
+			cam_target += (-right2 * event.relative.x + up2 * event.relative.y) * cam_dist * 0.0016
+		elif dragging:
+			_do_drag()
+
+
+func _do_drag() -> void:
+	var hit = _drag_hit()
+	if hit == null:
+		return
+	var h: Vector3 = hit
+	if step == "Hull":
+		var nx := _snapv(h.x - drag_start.x + drag_orig.x)
+		var ny := _snapv(h.y - drag_start.y + drag_orig.y)
+		var dx := nx - drag_last.x
+		var dy := ny - drag_last.y
+		if absf(dx) < 1e-6 and absf(dy) < 1e-6:
+			return
+		drag_last = Vector3(nx, ny, 0)
+		if sel_vert >= 0:
+			_move_vertex_by(sel_ring, sel_vert, dx, dy)
+		else:
+			_move_ring_by(sel_ring, dx, dy)
+		_changed()
+	elif step == "Modules" and sel_mod >= 0:
+		var m := ShipData.get_module(bp, sel_mod)
+		var np := Vector3(_snapv(drag_orig.x + h.x - drag_start.x), _snapv(drag_orig.y + h.y - drag_start.y), _snapv(drag_orig.z + h.z - drag_start.z))
+		if np != ShipData.v3(m["pos"]):
+			m["pos"] = ShipData.a3(np)
+			_changed()
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton and event.pressed:
+		match event.button_index:
+			MOUSE_BUTTON_WHEEL_UP:
+				cam_dist = maxf(cam_dist * 0.9, 0.5)
+			MOUSE_BUTTON_WHEEL_DOWN:
+				cam_dist = minf(cam_dist * 1.1, 1.0e7)
+			MOUSE_BUTTON_RIGHT:
+				orbiting = true
+			MOUSE_BUTTON_MIDDLE:
+				panning = true
+			MOUSE_BUTTON_LEFT:
+				_click()
+	elif event is InputEventKey and event.pressed and not event.echo or (event is InputEventKey and event.pressed and event.echo):
+		var k := event as InputEventKey
+		if k.ctrl_pressed and k.keycode == KEY_Z:
+			_undo()
+			return
+		if k.ctrl_pressed and k.keycode == KEY_Y:
+			_redo()
+			return
+		_nudge(k)
+
+
+func _click() -> void:
+	match step:
+		"Hull":
+			var h := _pick_handle()
+			if h.x >= 0:
+				sel_ring = h.x
+				sel_vert = -1 if ring_mode else h.y
+				_push_undo()
+				var ring := _ring(sel_ring)
+				var v := ShipData.ring_vertex(ring, h.y)
+				var hit = _drag_hit()
+				if hit != null:
+					dragging = true
+					drag_start = hit
+					drag_last = Vector3(v.x, v.y, 0)
+					drag_orig = Vector3(v.x, v.y, 0) if sel_vert >= 0 else Vector3(0, 0, 0)
+					if sel_vert < 0:
+						drag_last = Vector3(0, 0, 0)
+				_changed(false)
+		"Modules":
+			var id := _pick_module()
+			if id >= 0:
+				sel_mod = id
+				_push_undo()
+				var m := ShipData.get_module(bp, id)
+				var hit2 = _drag_hit()
+				if hit2 != null:
+					dragging = true
+					drag_start = hit2
+					drag_orig = ShipData.v3(m["pos"])
+				_build_tools()
+				_changed(false)
+		"Links":
+			var id2 := _pick_module()
+			if id2 < 0:
+				link_from = -1
+			elif link_from < 0:
+				link_from = id2
+				say("Link from #%d - now click the target module." % id2)
+			else:
+				if id2 != link_from:
+					_push_undo()
+					if ShipData.add_link(bp, link_from, id2):
+						say("Linked #%d - #%d" % [link_from, id2])
+					else:
+						say("Link not allowed between those module types (or already linked).")
+				link_from = -1
+				_build_tools()
+			_changed(false)
+
+
+func _nudge(k: InputEvent) -> void:
+	var key := (k as InputEventKey).keycode
+	var d := Vector3.ZERO
+	match key:
+		KEY_LEFT:
+			d.x = -1
+		KEY_RIGHT:
+			d.x = 1
+		KEY_UP:
+			d.y = 1
+		KEY_DOWN:
+			d.y = -1
+		KEY_PAGEUP:
+			d.z = -1
+		KEY_PAGEDOWN:
+			d.z = 1
+		KEY_DELETE:
+			if step == "Modules":
+				_delete_module()
+			return
+		_:
+			return
+	var amt := snap * (4.0 if (k as InputEventKey).shift_pressed else 1.0)
+	d *= amt
+	if _t - _last_undo_t > 0.6:
+		_push_undo()
+	_last_undo_t = _t
+	if step == "Hull":
+		if d.z != 0.0:
+			_move_ring_z(sel_ring, d.z)
+		elif sel_vert >= 0:
+			_move_vertex_by(sel_ring, sel_vert, d.x, d.y)
+		else:
+			_move_ring_by(sel_ring, d.x, d.y)
+		_changed()
+	elif step == "Modules" and sel_mod >= 0:
+		var m := ShipData.get_module(bp, sel_mod)
+		m["pos"] = ShipData.a3(ShipData.v3(m["pos"]) + d)
+		_changed()
+	get_viewport().set_input_as_handled()

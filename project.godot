@@ -1,0 +1,32 @@
+; Engine configuration file.
+config_version=5
+
+[application]
+
+config/name="Forge Thy Doctrine"
+config/description="Instrument of Ege - prototype (roadmap steps 1-3, single player)"
+run/main_scene="res://scenes/main_menu.tscn"
+config/features=PackedStringArray("4.4", "Forward Plus")
+
+[autoload]
+
+Game="*res://scripts/autoload/game.gd"
+
+[display]
+
+window/size/viewport_width=1600
+window/size/viewport_height=900
+
+[layer_names]
+
+3d_physics/layer_1="ships"
+3d_physics/layer_2="debris"
+
+[physics]
+
+3d/default_gravity=0.0
+common/physics_ticks_per_second=60
+
+[rendering]
+
+environment/defaults/default_clear_color=Color(0, 0, 0, 1)
