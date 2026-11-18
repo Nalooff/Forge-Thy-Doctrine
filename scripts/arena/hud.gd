@@ -30,7 +30,7 @@ var arena
 var ship: Ship
 var mode := "Movement"
 var sub_open := false
-var radar_zoom := 2000.0
+var radar_zoom := 1200.0
 var speed_limit := 150.0
 var root: Control
 var overlay: Control
@@ -417,38 +417,194 @@ class Overlay extends Control:
 			Hud.outlined(self, "%s %s  %dm" % ["LOCK" if locked else "", o.name, int(d)], p + Vector2(r + 4, 4), 12, col2)
 
 
-class RadarView extends Control:
+class Radar3D extends Control:
+	## True 3D tactical radar: a sphere/disc grid drawn in ship space (nose = up the screen),
+	## contacts are 3D markers with an altitude stalk down to the plane. Drag to rotate, wheel to zoom range.
 	var hud: Hud
+	var vp: SubViewport
+	var cam: Camera3D
+	var root3: Node3D
+	var yaw := 0.0
+	var pitch := -0.8
+	var dist := 2.55
+	var pool: Array = []
+	var shadows: Array = []
+	var stalks: ImmediateMesh
+	var dragging := false
+
+	func _init() -> void:
+		mouse_filter = Control.MOUSE_FILTER_STOP
+		var svc := SubViewportContainer.new()
+		svc.stretch = true
+		svc.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		svc.set_anchors_preset(Control.PRESET_FULL_RECT)
+		add_child(svc)
+		vp = SubViewport.new()
+		vp.own_world_3d = true
+		vp.transparent_bg = true
+		vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+		svc.add_child(vp)
+		root3 = Node3D.new()
+		vp.add_child(root3)
+		cam = Camera3D.new()
+		cam.fov = 38.0
+		cam.near = 0.05
+		cam.far = 50.0
+		root3.add_child(cam)
+		var lm := StandardMaterial3D.new()
+		lm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		lm.vertex_color_use_as_albedo = true
+		lm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		var grid := ImmediateMesh.new()
+		grid.surface_begin(Mesh.PRIMITIVE_LINES, lm)
+		for k in [0.33, 0.66, 1.0]:
+			_circle(grid, k, 0, Color(0.85, 0.38, 0.1, 0.8 if k == 1.0 else 0.45))
+		_circle(grid, 1.0, 1, Color(0.8, 0.35, 0.1, 0.5))
+		_circle(grid, 1.0, 2, Color(0.8, 0.35, 0.1, 0.5))
+		for a in [Vector3(1, 0, 0), Vector3(-1, 0, 0), Vector3(0, 0, 1)]:
+			_line(grid, Vector3.ZERO, a, Color(0.7, 0.3, 0.1, 0.4))
+		_line(grid, Vector3.ZERO, Vector3(0, 0, -1.12), Color(1.0, 0.8, 0.35, 0.95))
+		_line(grid, Vector3(0, -1, 0), Vector3(0, 1, 0), Color(0.7, 0.3, 0.1, 0.25))
+		grid.surface_end()
+		var gi := MeshInstance3D.new()
+		gi.mesh = grid
+		root3.add_child(gi)
+		stalks = ImmediateMesh.new()
+		var si := MeshInstance3D.new()
+		si.mesh = stalks
+		si.material_override = lm
+		root3.add_child(si)
+		var me := MeshInstance3D.new()
+		var cone := CylinderMesh.new()
+		cone.top_radius = 0.0
+		cone.bottom_radius = 0.05
+		cone.height = 0.16
+		me.mesh = cone
+		me.rotate_x(-PI * 0.5)
+		var mm := StandardMaterial3D.new()
+		mm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mm.albedo_color = Color(1.0, 0.85, 0.5)
+		me.material_override = mm
+		root3.add_child(me)
+
+	func _line(m: ImmediateMesh, a: Vector3, b: Vector3, c: Color) -> void:
+		m.surface_set_color(c)
+		m.surface_add_vertex(a)
+		m.surface_set_color(c)
+		m.surface_add_vertex(b)
+
+	func _circle(m: ImmediateMesh, r: float, plane: int, c: Color) -> void:
+		var n := 56
+		for i in n:
+			var a0 := float(i) * TAU / n
+			var a1 := float(i + 1) * TAU / n
+			var p0 := Vector3(cos(a0), 0, sin(a0)) * r
+			var p1 := Vector3(cos(a1), 0, sin(a1)) * r
+			if plane == 1:
+				p0 = Vector3(cos(a0), sin(a0), 0) * r
+				p1 = Vector3(cos(a1), sin(a1), 0) * r
+			elif plane == 2:
+				p0 = Vector3(0, sin(a0), cos(a0)) * r
+				p1 = Vector3(0, sin(a1), cos(a1)) * r
+			_line(m, p0, p1, c)
+
+	func _process(_delta: float) -> void:
+		var off := Vector3(0, 0, dist).rotated(Vector3.RIGHT, pitch).rotated(Vector3.UP, yaw)
+		cam.look_at_from_position(off, Vector3.ZERO, Vector3.UP)
+		stalks.clear_surfaces()
+		var used := 0
+		if hud != null and hud.ship != null and is_instance_valid(hud.ship):
+			var me: Ship = hud.ship
+			var rng := minf(hud.radar_zoom, me.radar_range())
+			var begun := false
+			for group in ["ships", "wrecks"]:
+				for n in get_tree().get_nodes_in_group(group):
+					var o := n as Ship
+					if o == me:
+						continue
+					var l := me.to_local(o.global_position)
+					if l.length() > rng:
+						continue
+					var p := l / rng
+					var col := Color(0.5, 0.45, 0.42)
+					if group == "ships":
+						col = Color(1.0, 0.22, 0.12) if o.team != me.team else Color(0.4, 0.7, 1.0)
+					var tgt := o == me.target
+					if used >= pool.size():
+						var mi := MeshInstance3D.new()
+						var sm := SphereMesh.new()
+						sm.radius = 0.065
+						sm.height = 0.13
+						sm.radial_segments = 10
+						sm.rings = 5
+						mi.mesh = sm
+						var mat := StandardMaterial3D.new()
+						mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+						mi.material_override = mat
+						root3.add_child(mi)
+						pool.append(mi)
+					if used >= shadows.size():
+						var sh := MeshInstance3D.new()
+						var shm := SphereMesh.new()
+						shm.radius = 0.05
+						shm.height = 0.1
+						sh.mesh = shm
+						sh.scale = Vector3(1, 0.12, 1)
+						var shmat := StandardMaterial3D.new()
+						shmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+						sh.material_override = shmat
+						root3.add_child(sh)
+						shadows.append(sh)
+					var shn := shadows[used] as MeshInstance3D
+					shn.visible = true
+					shn.position = Vector3(p.x, 0, p.z)
+					(shn.material_override as StandardMaterial3D).albedo_color = col.darkened(0.45)
+					var node := pool[used] as MeshInstance3D
+					node.visible = true
+					node.position = p
+					node.scale = Vector3.ONE * (1.7 if tgt else 1.0)
+					(node.material_override as StandardMaterial3D).albedo_color = Color(1, 0.95, 0.6) if tgt else col
+					if not begun:
+						stalks.surface_begin(Mesh.PRIMITIVE_LINES)
+						begun = true
+					stalks.surface_set_color(col)
+					stalks.surface_add_vertex(Vector3(p.x, 0, p.z))
+					stalks.surface_set_color(col)
+					stalks.surface_add_vertex(p)
+					used += 1
+			if begun:
+				stalks.surface_end()
+		for i in range(used, pool.size()):
+			(pool[i] as MeshInstance3D).visible = false
+			(shadows[i] as MeshInstance3D).visible = false
+		queue_redraw()
 
 	func _draw() -> void:
-		var c := size * 0.5
-		var R := minf(size.x, size.y) * 0.5 - 2.0
-		for k in [0.33, 0.66, 1.0]:
-			draw_arc(c, R * k, 0, TAU, 48, Color(0.75, 0.33, 0.1, 0.5), 1.0)
-		draw_line(c + Vector2(-R, 0), c + Vector2(R, 0), Color(0.75, 0.33, 0.1, 0.35))
-		draw_line(c + Vector2(0, -R), c + Vector2(0, R), Color(0.75, 0.33, 0.1, 0.35))
-		draw_colored_polygon(PackedVector2Array([c + Vector2(0, -7), c + Vector2(5, 6), c + Vector2(-5, 6)]), Color(1.0, 0.85, 0.5))
 		if hud == null or hud.ship == null:
 			return
-		var me := hud.ship
-		var rng := minf(hud.radar_zoom, me.radar_range())
-		draw_string(ThemeDB.fallback_font, Vector2(c.x - 50, c.y + R - 22), "%d m%s" % [int(rng), "" if me.radar_range() > 1000.0 else " DEGRADED"], HORIZONTAL_ALIGNMENT_CENTER, 100, 9, AMBER)
-		for group in ["ships", "wrecks"]:
-			for s in get_tree().get_nodes_in_group(group):
-				var o := s as Ship
-				if o == me:
-					continue
-				var l := me.to_local(o.global_position)
-				if l.length() > rng:
-					continue
-				var p := c + Vector2(l.x, l.z) / rng * R
-				var col := Color(0.45, 0.42, 0.4)
-				if group == "ships":
-					col = Color(1, 0.22, 0.12) if o.team != me.team else Color(0.4, 0.7, 1.0)
-				draw_circle(p, 4.0 if o == me.target else 3.0, col)
-				draw_line(p, p + Vector2(0, -clampf(l.y / rng * R, -R, R)), col, 1.0)
-				if o == me.target:
-					draw_arc(p, 7.0, 0, TAU, 16, Color(1, 0.95, 0.5), 1.5)
+		var rng := minf(hud.radar_zoom, hud.ship.radar_range())
+		var txt := "%d m%s" % [int(rng), "" if hud.ship.radar_range() > 1000.0 else "  DEGRADED"]
+		Hud.outlined(self, txt, Vector2(0, size.y - 6), 9, Hud.AMBER, size.x, HORIZONTAL_ALIGNMENT_CENTER)
+		Hud.outlined(self, "drag: rotate  wheel: range", Vector2(0, 11), 8, Hud.ORANGE_DIM, size.x, HORIZONTAL_ALIGNMENT_CENTER)
+
+	func _gui_input(event: InputEvent) -> void:
+		if event is InputEventMouseButton:
+			if event.button_index == MOUSE_BUTTON_LEFT:
+				dragging = event.pressed
+				if event.pressed and event.double_click:
+					yaw = 0.0
+					pitch = -0.8
+				accept_event()
+			elif event.pressed and event.button_index == MOUSE_BUTTON_WHEEL_UP:
+				hud.radar_zoom = maxf(250.0, hud.radar_zoom / 1.4)
+				accept_event()
+			elif event.pressed and event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+				hud.radar_zoom = minf(8000.0, hud.radar_zoom * 1.4)
+				accept_event()
+		elif event is InputEventMouseMotion and dragging:
+			yaw -= event.relative.x * 0.01
+			pitch = clampf(pitch - event.relative.y * 0.01, -1.5, 1.2)
+			accept_event()
 
 
 # ================================================================== theme + helpers
@@ -578,20 +734,19 @@ func setup(a) -> void:
 	root.add_child(overlay)
 
 	# Sub Panel 2 first, so it sits behind the other panels (as in the mock-up)
-	sub_panel = _rect_panel("SUB PANEL 2", 411, 290, 756, 530)
+	sub_panel = _rect_panel("SUB", 411, 290, 756, 530)
 	sub_body = sub_panel.body
 	sub_panel.visible = false
 
 	# Panel 4: round radar
-	var p4 := _round_panel("PANEL 4 - TACTICAL RADAR", 475, 650, 312)
-	radar = RadarView.new()
-	(radar as RadarView).hud = self
-	radar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var p4 := _round_panel("TACTICAL RADAR", 475, 650, 312)
+	radar = Radar3D.new()
+	(radar as Radar3D).hud = self
 	radar.set_anchors_preset(Control.PRESET_FULL_RECT)
 	p4.full.add_child(radar)
 
 	# Panel 5: round objectives / log, with a toggle (tabs)
-	var p5 := _round_panel("PANEL 5 - OBJECTIVES / LOG", 1094, 638, 312)
+	var p5 := _round_panel("OBJECTIVES / LOG", 1094, 638, 312)
 	var vb5 := VBoxContainer.new()
 	vb5.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	vb5.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -626,7 +781,7 @@ func setup(a) -> void:
 	vb5.add_child(log_box)
 
 	# Panel 3: module management with category tabs
-	var p3 := _rect_panel("PANEL 3 - MODULES", 66, 681, 326, 219)
+	var p3 := _rect_panel("MODULES", 66, 681, 326, 219)
 	p3.set_tabs(MOD_TABS)
 	p3.tab_changed.connect(func(i: int): mod_filter = i; _apply_mod_filter())
 	var sc := ScrollContainer.new()
@@ -640,7 +795,7 @@ func setup(a) -> void:
 	p3.body.add_child(sc)
 
 	# Panel 2: mode selection
-	var p2 := _rect_panel("PANEL 2 - MODE SELECTION", 594, 611, 406, 289)
+	var p2 := _rect_panel("MODE SELECTION", 594, 611, 406, 289)
 	var grid := GridContainer.new()
 	grid.columns = 3
 	grid.add_theme_constant_override("h_separation", 3)
@@ -655,7 +810,7 @@ func setup(a) -> void:
 	btn_giveup.visible = false
 
 	# Panel 1: 3D ship model (Basic / Exploded / Onion tabs) + gauges + telemetry
-	var p1 := _rect_panel("PANEL 1 - SHIP STATUS", 1205, 653, 327, 247)
+	var p1 := _rect_panel("SHIP STATUS", 1205, 653, 327, 247)
 	p1.set_tabs(["Basic 3D", "Exploded", "Onion"])
 	p1.tab_changed.connect(func(i: int): preview.view = i; preview.refresh())
 	var hb1 := HBoxContainer.new()
@@ -860,7 +1015,7 @@ func set_mode(m: String) -> void:
 	mode = m
 	sub_open = true
 	sub_panel.visible = true
-	sub_panel.title = "SUB PANEL 2 - " + m.to_upper()
+	sub_panel.title = m.to_upper()
 	sub_panel.queue_redraw()
 	for c in sub_body.get_children():
 		c.queue_free()

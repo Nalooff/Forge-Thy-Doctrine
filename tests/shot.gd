@@ -16,6 +16,10 @@ func _initialize() -> void:
 		scn._set_step(a[2])
 	elif a.size() > 2 and scn.get("hud") != null:
 		scn.hud.set_mode(a[2])
+	if scn.get("player") != null:
+		scn._spawn_ship(Premades.dart(), 1, Vector3(220, 120, -420), Vector3(0, 0, 1))
+		scn._spawn_ship(Premades.lance(), 0, Vector3(-260, -90, -300), Vector3(0, 0, 1))
+		scn._spawn_ship(Premades.anvil(), 1, Vector3(60, -140, -700), Vector3(0, 0, 1))
 	for i in 90:
 		await process_frame
 	if scn.has_method("lock_target"):
