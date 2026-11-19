@@ -102,6 +102,38 @@ func run_all() -> void:
 	for m in a.mods_of("barrel"):
 		ammo_ok = ammo_ok or float(m["cool"]) >= 0.0
 	check(ammo_ok, "barrels tick")
+	# turret bay: rotates the touching barrels with it, turret control barrels stay fixed
+	var lb := Premades.lance()
+	check(ShipData.validate(lb).is_empty(), "turret-bay ship is legal")
+	var lx := Ship.new()
+	w.add_child(lx)
+	lx.setup(lb, 0)
+	lx.global_position = Vector3(-300, 0, 0)
+	var bay0: Dictionary = lx.mods_of("turret_bay")[0]
+	check((bay0["barrels"] as Array).size() == 2, "turret bay carries the 2 barrels touching it")
+	lx.cmd = {"aim_point": lx.global_position + Vector3(120, 40, -60), "fire": false}
+	for i in 90:
+		await physics_frame
+	var b0: Dictionary = lx.mods_of("barrel")[0]
+	check((b0["aim"] as Vector3).angle_to(Vector3(0, 0, -1)) > 0.3, "turret bay turns its barrel toward the aim point")
+	var dd := Premades.dart()
+	var dx := Ship.new()
+	w.add_child(dx)
+	dx.setup(dd, 0)
+	dx.global_position = Vector3(-500, 0, 0)
+	dx.cmd = {"aim_point": dx.global_position + Vector3(120, 40, -60)}
+	for i in 60:
+		await physics_frame
+	var fb: Dictionary = dx.mods_of("barrel")[0]
+	check((fb["aim"] as Vector3).angle_to(Vector3(0, 0, -1)) < 0.001, "turret-control barrels stay fixed")
+	var badbp := Premades.lance()
+	var bb := ShipData.get_module(badbp, int(ShipData.get_module(badbp, 1)["id"]))
+	var far := -1
+	for m in badbp["modules"]:
+		if m["type"] == "barrel":
+			far = int(m["id"])
+	ShipData.get_module(badbp, far)["pos"] = [4.0, 0.0, -6.0]
+	check(not ShipData.validate(badbp).is_empty(), "barrel that no longer touches its turret bay is rejected")
 	# commander post death = ship death
 	var c := Ship.new()
 	w.add_child(c)
@@ -137,7 +169,7 @@ func run_all() -> void:
 	ed.bp["modules"] = []
 	ed.bp["links"] = []
 	ed._set_step("Modules")
-	for t in ["commander_post", "generator", "engine_room", "turret_bay", "thruster", "barrel"]:
+	for t in ["commander_post", "generator", "engine_room", "turret_control", "thruster", "barrel"]:
 		ed._add_module(t)
 	await process_frame
 	check(ed.bp["modules"].size() == 6, "editor adds modules")
@@ -146,6 +178,16 @@ func run_all() -> void:
 	ed._changed()
 	await process_frame
 	check(ed.bp["links"].size() > 0, "auto-link creates links")
+	# auto-hull: an internal module sticking out of the hull gets enclosed
+	ed._set_step("Modules")
+	var big_id := ShipData.add_module(ed.bp, "generator", Vector3(0, 0, 0), Vector3(9, 6, 4))
+	check(ShipData.placement_ok(ed.bp, ShipData.get_module(ed.bp, big_id)) != "", "oversized internal module is not placeable at first")
+	ed._auto_hull_module(big_id)
+	check(ShipData.placement_ok(ed.bp, ShipData.get_module(ed.bp, big_id)) == "", "auto-hull encloses the module")
+	ShipData.remove_module(ed.bp, big_id)
+	ed.view_mode = 2
+	ed._changed(false)
+	await process_frame
 	ed._set_step("Cosmetics")
 	ed._set_step("Interior")
 	ed._set_step("Test")

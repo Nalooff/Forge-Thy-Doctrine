@@ -19,6 +19,9 @@ var link_from := -1
 var mirror := true
 var soft := false
 var ring_mode := false
+var view_mode := 0          # 0 shaded, 1 x-ray, 2 wireframe (GDD view modifier)
+var auto_hull_on := false
+var hull_clear := 0.3
 var snap := 0.25
 var budget := 600.0
 var map_idx := 0
@@ -221,13 +224,27 @@ func _build_ui() -> void:
 		var ss: String = s
 		_btn(ss, row1, func(): _set_step(ss))
 
+	var row2 := HBoxContainer.new()
+	vt.add_child(row2)
+	_lbl("View:", row2, 12)
+	var vm := OptionButton.new()
+	for v in ["Shaded", "X-ray", "Wireframe"]:
+		vm.add_item(v)
+	vm.item_selected.connect(func(i: int): view_mode = i; _changed(false))
+	row2.add_child(vm)
+	for pv in [["Perspective", 0.8, -0.4], ["Front", PI, 0.0], ["Rear", 0.0, 0.0], ["Side", PI * 0.5, 0.0], ["Top", 0.0, -1.5]]:
+		var yaw_v: float = pv[1]
+		var pit_v: float = pv[2]
+		_btn(pv[0], row2, func(): cam_yaw = yaw_v; cam_pitch = pit_v)
+	_lbl("   Hint: drag RMB orbit, MMB pan, wheel zoom", row2, 11)
+
 	# left tools
 	var lp := PanelContainer.new()
 	lp.add_theme_stylebox_override("panel", _panel_style())
 	lp.anchor_bottom = 1.0
 	lp.offset_left = 6
 	lp.offset_right = 300
-	lp.offset_top = 70
+	lp.offset_top = 96
 	lp.offset_bottom = -34
 	root.add_child(lp)
 	var sc := ScrollContainer.new()
@@ -245,7 +262,7 @@ func _build_ui() -> void:
 	rp.anchor_bottom = 1.0
 	rp.offset_left = -330
 	rp.offset_right = -6
-	rp.offset_top = 70
+	rp.offset_top = 96
 	rp.offset_bottom = -34
 	root.add_child(rp)
 	var rv := VBoxContainer.new()
@@ -319,6 +336,9 @@ func _load_pick(as_prefab: bool) -> void:
 		if scope == 1:
 			src["links"] = []
 	bp = ShipData.normalize(src)
+	if not as_prefab:
+		var ent: Dictionary = _ship_cache[pick_ships.selected]
+		Game.set_last_ship(ent["name"], ent["source"], ent["path"])
 	_after_load()
 	say("Loaded %s" % bp["name"])
 
@@ -332,6 +352,7 @@ func _save() -> void:
 		say("Save failed")
 		return
 	dirty_since_save = false
+	Game.set_last_ship(bp["name"], "user", path)
 	_refresh_ship_list()
 	say("Saved to %s" % ProjectSettings.globalize_path(path))
 
@@ -343,7 +364,7 @@ func _set_step(s: String) -> void:
 	var hints := {
 		"Hull": "LMB on a vertex: select/drag (mirror keeps symmetry). Arrows = X/Y, PageUp/PageDown = ring Z. RMB orbit, MMB/Shift+RMB pan, wheel zoom. Ctrl+Z undo.",
 		"Modules": "LMB a module to select and drag it (camera plane). Arrows/PageUp/PageDown nudge. Red outline = minimum size. White line = facing.",
-		"Links": "LMB module A, then module B to link (Commander Post -> Engine/Turret/Radar, Engine -> Thruster, Turret -> Barrel).",
+		"Links": "LMB module A, then module B to link: Commander Post -> Engine/Turret Control/Turret Bay/Radar, Engine -> Thruster, Turret Bay -> touching Barrel (turns it), Turret Control -> any Barrel (fixed).",
 		"Interior": "Corridors, doors, stairs and ladders belong to roadmap step 6 and are not in this prototype.",
 		"Cosmetics": "Colors only in this prototype. Stowage props and decals: later roadmap.",
 		"Test": "Launch the solo test range: place a dummy, shoot your own hull, test flight.",
@@ -449,6 +470,24 @@ func _tools_modules() -> void:
 	mod_list.item_selected.connect(func(i: int): sel_mod = int(mod_list.get_item_metadata(i)); _build_tools(); _changed(false))
 	tools.add_child(mod_list)
 	_fill_mod_list()
+	var ah := CheckButton.new()
+	ah.text = "Auto-hull on invalid placement"
+	ah.button_pressed = auto_hull_on
+	ah.focus_mode = Control.FOCUS_NONE
+	ah.add_theme_font_size_override("font_size", 12)
+	ah.toggled.connect(func(on: bool): auto_hull_on = on)
+	tools.add_child(ah)
+	var hr := HBoxContainer.new()
+	tools.add_child(hr)
+	_lbl("Hull clearance X (m)", hr, 12)
+	var hsl := HSlider.new()
+	hsl.min_value = 0.0
+	hsl.max_value = 3.0
+	hsl.step = 0.05
+	hsl.value = hull_clear
+	hsl.custom_minimum_size = Vector2(110, 18)
+	hsl.value_changed.connect(func(v: float): hull_clear = v)
+	hr.add_child(hsl)
 	if sel_mod < 0 or ShipData.get_module(bp, sel_mod).is_empty():
 		_lbl("Select a module (list or click in 3D).", tools, 12)
 		return
@@ -493,6 +532,8 @@ func _tools_modules() -> void:
 		_lbl("dmg %.0f  pen %.2f  rate %.1f/s  power %.1f MW" % [ws["damage"], ws["pen"], 1.0 / float(ws["interval"]), ws["power"]], tools, 11)
 	var ms := ShipData.module_stats(m)
 	_lbl("HP %.0f   mass %.1f t   cost %.1f pts" % [ms["hp"], ms["mass"], ms["cost"]], tools, 11)
+	if def["kind"] == "internal":
+		_btn("Auto-hull: enclose this module", tools, func(): _push_undo(); _auto_hull_module(sel_mod))
 	var br := HBoxContainer.new()
 	tools.add_child(br)
 	_btn("Duplicate", br, func(): _duplicate_module(false))
@@ -729,9 +770,63 @@ func _add_module(type: String) -> void:
 			pos = Vector3(0, 0, b.position.z - size.z * 0.1)
 		"barrel":
 			pos = Vector3(0, 0, b.position.z)
-	sel_mod = ShipData.add_module(bp, type, pos, size, 0, "kinetic")
+		"turret_bay":
+			pos = Vector3(0, b.end.y - size.y * 0.25, c.z)
+	sel_mod = ShipData.add_module(bp, type, pos, size, 4 if type == "turret_bay" else 0, "kinetic")
 	_changed()
+	_maybe_auto_hull(sel_mod)
 	_build_tools()
+
+
+## Auto-Hull (GDD 2.1): push the hull outward so an internal module is fully enclosed, keeping X metres of clearance.
+func _auto_hull_module(id: int) -> void:
+	var m := ShipData.get_module(bp, id)
+	if m.is_empty() or ShipData.MODULES[m["type"]]["kind"] != "internal":
+		return
+	var box := ShipData.module_box(m).grow(hull_clear)
+	var rings: Array = bp["rings"]
+	var first := _ring(0)
+	var last := _ring(rings.size() - 1)
+	if box.position.z < float(first["z"]):
+		first["z"] = box.position.z
+	if box.end.z > float(last["z"]):
+		last["z"] = box.end.z
+	var i0 := 0
+	var i1 := rings.size() - 1
+	for i in range(rings.size()):
+		if float(rings[i]["z"]) <= box.position.z:
+			i0 = i
+	for i in range(rings.size() - 1, -1, -1):
+		if float(rings[i]["z"]) >= box.end.z:
+			i1 = i
+	var corners := [Vector2(box.position.x, box.position.y), Vector2(box.end.x, box.position.y), Vector2(box.end.x, box.end.y), Vector2(box.position.x, box.end.y)]
+	for i in range(i0, i1 + 1):
+		var ring := _ring(i)
+		var c := ShipData.ring_center(ring)
+		for it in 90:
+			var poly := PackedVector2Array()
+			for p in ring["pts"]:
+				poly.append(Vector2(float(p[0]), float(p[1])))
+			var ok := true
+			for cn in corners:
+				if not Geometry2D.is_point_in_polygon(cn, poly):
+					ok = false
+			if ok:
+				break
+			for p in ring["pts"]:
+				p[0] = c.x + (float(p[0]) - c.x) * 1.04
+				p[1] = c.y + (float(p[1]) - c.y) * 1.04
+	_changed()
+
+
+func _maybe_auto_hull(id: int) -> void:
+	if not auto_hull_on:
+		return
+	var m := ShipData.get_module(bp, id)
+	if m.is_empty() or ShipData.MODULES[m["type"]]["kind"] != "internal":
+		return
+	if ShipData.placement_ok(bp, m) != "":
+		_auto_hull_module(id)
 
 
 func _set_size(ax: int, v: float) -> void:
@@ -745,6 +840,7 @@ func _set_size(ax: int, v: float) -> void:
 	s[ax] = maxf(v, (ShipData.MODULES[m["type"]]["min"] as Vector3)[ax])
 	m["size"] = ShipData.a3(s)
 	_changed()
+	_maybe_auto_hull(sel_mod)
 
 
 func _duplicate_module(mirrored: bool) -> void:
@@ -791,7 +887,10 @@ func _rebuild() -> void:
 	var c := ShipData.col(bp["color"])
 	hull_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	c.a = 1.0 if step == "Cosmetics" else (0.7 if step == "Hull" else 0.28)
+	if view_mode == 1:
+		c.a = minf(c.a, 0.2)
 	hull_mat.albedo_color = c
+	hull_mi.visible = view_mode != 2
 	stats = ShipData.compute_stats(bp)
 	issues = ShipData.validate(bp, {"max_tier": MAPS[map_idx]["tier"], "budget": budget})
 	_rebuild_handles()
@@ -890,14 +989,15 @@ func _rebuild_lines() -> void:
 	line_mesh.surface_begin(Mesh.PRIMITIVE_LINES)
 	var rings: Array = bp["rings"]
 	var L := float(stats["longest"])
-	if step == "Hull":
+	if step == "Hull" or view_mode == 2:
 		for r in range(rings.size()):
-			var col := Color(1.0, 0.6, 0.2) if r == sel_ring else Color(0.5, 0.55, 0.65)
+			var col := Color(1.0, 0.6, 0.2) if (r == sel_ring and step == "Hull") else Color(0.5, 0.55, 0.65)
 			for i in ShipData.RING_PTS:
 				_line(ShipData.ring_vertex(rings[r], i), ShipData.ring_vertex(rings[r], (i + 1) % ShipData.RING_PTS), col)
 			if r < rings.size() - 1:
 				for i in ShipData.RING_PTS:
 					_line(ShipData.ring_vertex(rings[r], i), ShipData.ring_vertex(rings[r + 1], i), Color(0.35, 0.4, 0.5))
+	if step == "Hull":
 		var b := ShipData.hull_bounds(rings)
 		var hy := b.size.y * 0.8
 		var z0 := b.position.z - L * 0.05
@@ -1062,6 +1162,7 @@ func _do_drag() -> void:
 		if np != ShipData.v3(m["pos"]):
 			m["pos"] = ShipData.a3(np)
 			_changed()
+			_maybe_auto_hull(sel_mod)
 
 
 func _unhandled_input(event: InputEvent) -> void:

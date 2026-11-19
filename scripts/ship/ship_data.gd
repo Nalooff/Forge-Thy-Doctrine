@@ -25,12 +25,15 @@ const MODULES := {
 	"commander_post": {"label": "Commander Post", "kind": "external", "min": Vector3(1.6, 1.6, 2.0), "density": 0.5, "cost": 7.0, "idle": 0.5, "hp": 0.8, "face": 1, "color": Color(0.35, 0.8, 1.0)},
 	"generator": {"label": "Generator", "kind": "internal", "min": Vector3(2, 2, 2), "density": 1.0, "cost": 3.5, "idle": 0.0, "hp": 1.0, "face": 0, "color": Color(1.0, 0.85, 0.25)},
 	"engine_room": {"label": "Engine Room", "kind": "internal", "min": Vector3(2.5, 2, 3), "density": 0.8, "cost": 2.5, "idle": 2.0, "hp": 1.2, "face": 0, "color": Color(1.0, 0.55, 0.2)},
-	"turret_bay": {"label": "Turret Bay", "kind": "internal", "min": Vector3(2.5, 1.5, 2.5), "density": 0.9, "cost": 3.0, "idle": 1.5, "hp": 1.0, "face": 0, "color": Color(0.9, 0.3, 0.3)},
+	"turret_bay": {"label": "Turret Bay", "kind": "external", "min": Vector3(2.0, 1.2, 2.0), "density": 0.9, "cost": 4.0, "idle": 1.5, "hp": 1.0, "face": 1, "color": Color(0.9, 0.3, 0.3)},
+	"turret_control": {"label": "Turret Control", "kind": "internal", "min": Vector3(2.0, 1.5, 2.0), "density": 0.7, "cost": 3.0, "idle": 1.2, "hp": 1.0, "face": 0, "color": Color(0.9, 0.5, 0.6)},
 	"radar_room": {"label": "Radar Room", "kind": "internal", "min": Vector3(2, 2, 2), "density": 0.5, "cost": 3.0, "idle": 3.0, "hp": 0.7, "face": 0, "color": Color(0.5, 1.0, 0.5)},
 	"thruster": {"label": "Thruster", "kind": "external", "min": Vector3(1, 1, 2), "density": 0.6, "cost": 4.5, "idle": 0.0, "hp": 0.8, "face": -1, "color": Color(1.0, 0.7, 0.2)},
 	"barrel": {"label": "Barrel", "kind": "external", "min": Vector3(0.5, 0.5, 2.5), "density": 1.2, "cost": 5.0, "idle": 0.0, "hp": 0.9, "face": 1, "color": Color(0.8, 0.8, 0.85)},
 }
-const LINK_RULES := {"commander_post": ["engine_room", "turret_bay", "radar_room"], "engine_room": ["thruster"], "turret_bay": ["barrel"]}
+## Turret Bay (external): rotates the barrels that physically touch it. Turret Control (internal): links to any
+## barrel, but those barrels stay fixed.
+const LINK_RULES := {"commander_post": ["engine_room", "turret_control", "turret_bay", "radar_room"], "engine_room": ["thruster"], "turret_bay": ["barrel"], "turret_control": ["barrel"]}
 const OVERLAP_OK := [["turret_bay", "barrel"], ["engine_room", "thruster"], ["engine_room", "generator"]]
 
 const CLASSES := [
@@ -121,6 +124,10 @@ static func link_allowed(ta: String, tb: String) -> bool:
 	return (LINK_RULES.has(ta) and tb in LINK_RULES[ta]) or (LINK_RULES.has(tb) and ta in LINK_RULES[tb])
 
 
+static func touching(a: Dictionary, b: Dictionary) -> bool:
+	return module_box(a).grow(0.06).intersects(module_box(b))
+
+
 static func has_link(bp: Dictionary, a: int, b: int) -> bool:
 	for l in bp["links"]:
 		if (l[0] == a and l[1] == b) or (l[0] == b and l[1] == a):
@@ -134,6 +141,9 @@ static func add_link(bp: Dictionary, a: int, b: int) -> bool:
 	if ma.is_empty() or mb.is_empty() or a == b or has_link(bp, a, b):
 		return false
 	if not link_allowed(ma["type"], mb["type"]):
+		return false
+	var pair := [ma["type"], mb["type"]]
+	if "turret_bay" in pair and "barrel" in pair and not touching(ma, mb):
 		return false
 	bp["links"].append([a, b])
 	return true
@@ -161,31 +171,44 @@ static func linked_ids(bp: Dictionary, id: int, of_type := "") -> Array:
 	return out
 
 
-## Link every thruster/barrel to its nearest engine room/turret bay, and the commander posts to every control target.
+## Link every thruster to its nearest engine room, every barrel to the Turret Bay it touches (else the nearest
+## Turret Control), and the commander posts to every control target.
 static func auto_link(bp: Dictionary) -> void:
 	bp["links"] = []
 	for m in bp["modules"]:
-		var want := ""
 		if m["type"] == "thruster":
-			want = "engine_room"
+			var best := -1
+			var bd := INF
+			for o in bp["modules"]:
+				if o["type"] == "engine_room":
+					var d := v3(o["pos"]).distance_to(v3(m["pos"]))
+					if d < bd:
+						bd = d
+						best = int(o["id"])
+			if best >= 0:
+				add_link(bp, int(m["id"]), best)
 		elif m["type"] == "barrel":
-			want = "turret_bay"
-		if want == "":
-			continue
-		var best := -1
-		var bd := INF
-		for o in bp["modules"]:
-			if o["type"] == want:
-				var d := v3(o["pos"]).distance_to(v3(m["pos"]))
-				if d < bd:
-					bd = d
-					best = int(o["id"])
-		if best >= 0:
-			add_link(bp, int(m["id"]), best)
+			var best_bay := -1
+			var bd2 := INF
+			for o in bp["modules"]:
+				if o["type"] == "turret_bay" and touching(o, m):
+					var d2 := v3(o["pos"]).distance_to(v3(m["pos"]))
+					if d2 < bd2:
+						bd2 = d2
+						best_bay = int(o["id"])
+			if best_bay < 0:
+				for o in bp["modules"]:
+					if o["type"] == "turret_control":
+						var d3 := v3(o["pos"]).distance_to(v3(m["pos"]))
+						if d3 < bd2:
+							bd2 = d3
+							best_bay = int(o["id"])
+			if best_bay >= 0:
+				add_link(bp, int(m["id"]), best_bay)
 	for cp in bp["modules"]:
 		if cp["type"] == "commander_post":
 			for o in bp["modules"]:
-				if o["type"] in ["engine_room", "turret_bay", "radar_room"]:
+				if o["type"] in ["engine_room", "turret_control", "turret_bay", "radar_room"]:
 					add_link(bp, int(cp["id"]), int(o["id"]))
 
 
@@ -496,6 +519,14 @@ static func placement_ok(bp: Dictionary, m: Dictionary) -> String:
 			inside += 1
 	if def["kind"] == "internal":
 		return "" if inside == 8 else "must be fully inside the hull (Not Placeable Here)"
+	if m["type"] == "barrel":
+		for bid in linked_ids(bp, int(m["id"]), "turret_bay"):
+			if touching(get_module(bp, int(bid)), m):
+				var dv0: Vector3 = DIRS[int(m["dir"])]
+				var half0 := v3(m["size"])[DIR_AXIS[int(m["dir"])]] * 0.5
+				if hull_contains(rings, v3(m["pos"]) + dv0 * (half0 + 0.02)):
+					return "its muzzle is still inside the hull"
+				return ""
 	if inside == 0:
 		return "must be anchored to the hull (no part inside)"
 	if inside == 8:
@@ -572,9 +603,14 @@ static func validate(bp: Dictionary, ctx := {}) -> Array:
 				if thruster_engine(bp, id) < 0:
 					issues.append({"msg": "Thruster #%d is not linked to an Engine Room" % id, "mod": id})
 			"barrel":
-				if linked_ids(bp, id, "turret_bay").is_empty():
-					issues.append({"msg": "Barrel #%d is not linked to a Turret Bay" % id, "mod": id})
-			"engine_room", "turret_bay":
+				var bays := linked_ids(bp, id, "turret_bay")
+				var ctrls := linked_ids(bp, id, "turret_control")
+				if bays.is_empty() and ctrls.is_empty():
+					issues.append({"msg": "Barrel #%d is not linked to a Turret Bay or Turret Control" % id, "mod": id})
+				for bid in bays:
+					if not touching(get_module(bp, int(bid)), m):
+						issues.append({"msg": "Barrel #%d must touch its Turret Bay #%d" % [id, bid], "mod": id})
+			"engine_room", "turret_bay", "turret_control":
 				if linked_ids(bp, id, "commander_post").is_empty():
 					issues.append({"msg": "%s #%d has no Commander Post link" % [MODULES[m["type"]]["label"], id], "mod": id})
 	var st := compute_stats(bp)

@@ -116,6 +116,12 @@ func setup(blueprint: Dictionary, p_team: int) -> void:
 	add_child(hull_mi)
 	for m in bp["modules"]:
 		_make_module(m)
+	for m in mods:
+		if m["type"] == "barrel" and int(m["bay"]) >= 0 and by_id.has(int(m["bay"])):
+			(by_id[int(m["bay"])]["barrels"] as Array).append(int(m["id"]))
+	for m in mods:
+		if m["type"] == "turret_bay":
+			m["slew"] = clampf(4.0 / sqrt(maxf(ShipData.module_volume(bp["modules"][mods.find(m)]), 1.0)), 0.4, 3.0)
 	_refresh_caps()
 
 
@@ -129,6 +135,8 @@ func _make_module(m: Dictionary) -> void:
 		"demand": 0.0, "frac": 1.0, "prio": 0.0, "enabled": true, "throttle": 0.0,
 		"box": ShipData.module_box(m), "node": null, "pivot": null, "flame": null, "mat": null,
 		"cool": 0.0, "ammo": -1, "aim": ShipData.DIRS[int(m["dir"])], "ws": {}, "len": 0.0, "engine": -1, "ef": 1.0,
+		"bay": -1, "ctrls": [], "mount": ShipData.DIRS[int(m["dir"])], "cur_pos": ShipData.v3(m["pos"]), "q": Quaternion.IDENTITY,
+		"barrels": [], "slew": 1.5, "limit": 75.0,
 	}
 	if m["type"] == "thruster":
 		rm["engine"] = ShipData.thruster_engine(bp, int(m["id"]))
@@ -140,6 +148,7 @@ func _make_module(m: Dictionary) -> void:
 		rm["len"] = ShipData.barrel_dims(m).x
 		var bays := ShipData.linked_ids(bp, int(m["id"]), "turret_bay")
 		rm["bay"] = int(bays[0]) if not bays.is_empty() else -1
+		rm["ctrls"] = ShipData.linked_ids(bp, int(m["id"]), "turret_control")
 	by_id[int(m["id"])] = rm
 	mods.append(rm)
 	if def["kind"] != "external":
@@ -180,6 +189,9 @@ func _make_module(m: Dictionary) -> void:
 			fl.scale = Vector3(1, 0.01, 1)
 			add_child(fl)
 			rm["flame"] = fl
+		"turret_bay":
+			mat.albedo_color = Color(0.3, 0.3, 0.34)
+			rm["node"] = _box_node(rm["pos"], rm["size"], mat)
 		"barrel":
 			var pivot := Node3D.new()
 			pivot.position = rm["pos"]
@@ -366,7 +378,7 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 	var gyro_peak := 0.5 * sqrt(mass)
 	_virt_gyro["demand"] = gyro_peak * (alpha_des.length() / maxf(alpha_max, 0.001)) if alpha_max > 0.0 else 0.0
 	for m in mods:
-		if m["type"] == "barrel" and module_online(m) and switches["weapons"] and controlled and cmd.get("fire", false):
+		if m["type"] == "barrel" and controlled and cmd.get("fire", false) and _barrel_controlled(m):
 			m["demand"] = float(m["ws"]["power"])
 
 	# ---- power allocation (closest to a generator = highest priority)
@@ -443,42 +455,89 @@ func _physics_process(delta: float) -> void:
 	_update_visuals()
 
 
+## A barrel can act when its own module is online and a Turret Bay or Turret Control it is linked to is online.
+func _barrel_controlled(m: Dictionary) -> bool:
+	if not switches["weapons"] or not module_online(m):
+		return false
+	var bay: Dictionary = by_id.get(int(m["bay"]), {})
+	if not bay.is_empty() and module_online(bay):
+		return true
+	for c in m["ctrls"]:
+		var cm: Dictionary = by_id.get(int(c), {})
+		if not cm.is_empty() and module_online(cm):
+			return true
+	return false
+
+
+func _mounted(m: Dictionary) -> bool:
+	var bay: Dictionary = by_id.get(int(m["bay"]), {})
+	return not bay.is_empty() and bool(bay["alive"])
+
+
+## World point a barrel should be pointed at (lead aiming when a target is locked).
+func _barrel_aim_world(m: Dictionary) -> Vector3:
+	var basis := global_transform.basis
+	var origin := to_global(m["cur_pos"])
+	var ws: Dictionary = m["ws"]
+	var tgt = cmd.get("aim_target", null)
+	if tgt != null and is_instance_valid(tgt) and (tgt as Ship).alive:
+		var sp := float(ws["speed"]) if ws["kind"] == "kinetic" else 0.0
+		return lead_point(origin, sp, (tgt as Ship).global_position, (tgt as Ship).linear_velocity, linear_velocity)
+	var apt = cmd.get("aim_point", null)
+	if apt != null:
+		return apt
+	return origin + basis * (m["mount"] as Vector3) * 100.0
+
+
 func _update_barrels(delta: float) -> void:
 	var controlled := alive and not cmd.is_empty()
 	var basis := global_transform.basis
+	var inv := basis.inverse()
+	# ---- Turret Bays slew as one body: the barrels touching them are carried along, so aiming stays consistent
+	for bay in mods:
+		if bay["type"] != "turret_bay" or not bay["alive"]:
+			continue
+		var q: Quaternion = bay["q"]
+		var target_q := Quaternion.IDENTITY
+		if controlled and module_online(bay) and switches["weapons"] and not (bay["barrels"] as Array).is_empty():
+			var ref: Dictionary = by_id[int((bay["barrels"] as Array)[0])]
+			var want := (inv * (_barrel_aim_world(ref) - to_global(bay["pos"]))).normalized()
+			var mount: Vector3 = ref["mount"]
+			var ang := mount.angle_to(want)
+			var lim := deg_to_rad(float(bay["limit"]))
+			if ang > lim:
+				want = mount.slerp(want, lim / ang).normalized()
+			if mount.cross(want).length() > 1e-5 or mount.dot(want) > 0.0:
+				target_q = Quaternion(mount, want)
+		var a := q.angle_to(target_q)
+		if a > 1e-4:
+			q = q.slerp(target_q, clampf(float(bay["slew"]) * delta / a, 0.0, 1.0))
+		bay["q"] = q
+		if bay["node"] != null:
+			(bay["node"] as Node3D).basis = Basis(q)
+		for bid in bay["barrels"]:
+			var b: Dictionary = by_id[int(bid)]
+			b["aim"] = q * (b["mount"] as Vector3)
+			b["cur_pos"] = (bay["pos"] as Vector3) + q * ((b["pos"] as Vector3) - (bay["pos"] as Vector3))
+			if b["pivot"] != null:
+				(b["pivot"] as Node3D).position = b["cur_pos"]
+				_aim_pivot(b)
+	# ---- firing
 	for m in mods:
 		if m["type"] != "barrel":
 			continue
 		m["cool"] = maxf(0.0, float(m["cool"]) - delta * float(m["frac"]))
-		if not m["alive"] or not controlled:
+		if not m["alive"] or not controlled or not _barrel_controlled(m):
 			continue
-		var bay: Dictionary = by_id.get(int(m["bay"]), {})
-		var ok: bool = (not bay.is_empty()) and module_online(bay) and switches["weapons"] and module_online(m)
-		if not ok:
-			continue
-		var ws: Dictionary = m["ws"]
-		var apt = cmd.get("aim_point", null)
-		var tgt = cmd.get("aim_target", null)
-		var pt: Vector3 = to_global(m["pos"]) + basis * (ShipData.DIRS[int(m["dir"])] as Vector3) * 100.0
-		if tgt != null and is_instance_valid(tgt) and (tgt as Ship).alive:
-			var sp := float(ws["speed"])
-			pt = lead_point(to_global(m["pos"]), sp if ws["kind"] == "kinetic" else 0.0, (tgt as Ship).global_position, (tgt as Ship).linear_velocity, linear_velocity)
-		elif apt != null:
-			pt = apt
-		var desired := (basis.inverse() * (pt - to_global(m["pos"]))).normalized()
-		var mount: Vector3 = ShipData.DIRS[int(m["dir"])]
-		if desired.angle_to(mount) > deg_to_rad(65.0):
-			desired = mount.slerp(desired, deg_to_rad(65.0) / desired.angle_to(mount)).normalized()
-		var cur: Vector3 = m["aim"]
-		var ang := cur.angle_to(desired)
-		if ang > 0.0001:
-			cur = cur.slerp(desired, clampf(2.5 * delta / ang, 0.0, 1.0)).normalized()
-		m["aim"] = cur
-		if m["pivot"] != null:
-			_aim_pivot(m)
-		var aligned := cur.angle_to(desired) < deg_to_rad(4.0)
-		if cmd.get("fire", false) and float(m["cool"]) <= 0.0 and float(m["frac"]) > 0.3 and aligned and int(m["ammo"]) != 0:
-			_fire(m, tgt)
+		var aim: Vector3 = m["aim"]
+		var ok := true
+		if _mounted(m):
+			var desired := (inv * (_barrel_aim_world(m) - to_global(m["cur_pos"]))).normalized()
+			ok = aim.angle_to(desired) < deg_to_rad(4.0)
+		var muzzle: Vector3 = (m["cur_pos"] as Vector3) + aim * (float(m["len"]) * 0.5 + 0.3)
+		var blocked := ShipData.hull_contains(bp["rings"], muzzle + aim * 1.5)
+		if cmd.get("fire", false) and float(m["cool"]) <= 0.0 and float(m["frac"]) > 0.3 and ok and not blocked and int(m["ammo"]) != 0:
+			_fire(m, cmd.get("aim_target", null))
 
 
 func _fire(m: Dictionary, tgt) -> void:
@@ -486,7 +545,7 @@ func _fire(m: Dictionary, tgt) -> void:
 	var basis := global_transform.basis
 	var aim: Vector3 = m["aim"]
 	var dir := (basis * aim).normalized()
-	var from := to_global((m["pos"] as Vector3) + aim * (float(m["len"]) * 0.5 + 0.3))
+	var from := to_global((m["cur_pos"] as Vector3) + aim * (float(m["len"]) * 0.5 + 0.3))
 	m["cool"] = float(ws["interval"])
 	var parent := get_parent()
 	match ws["kind"]:

@@ -5,7 +5,7 @@ func _initialize() -> void:
 	var mode: String = args[0] if args.size() > 0 else "sandbox"
 	var secs: float = float(args[1]) if args.size() > 1 else 5.0
 	var g: Node = get_root().get_node("Game")
-	g.session = {"mode": mode, "ship": Premades.dart(), "return_scene": "res://scenes/main_menu.tscn", "bots_ally": 1, "bots_enemy": 2, "kill_limit": 3}
+	g.session = {"mode": mode, "ship": Premades.dart(), "return_scene": "res://scenes/main_menu.tscn", "bots_ally": 1, "bots_enemy": 3, "kill_limit": 3, "ruleset": (args[2] if args.size() > 2 else "tdm")}
 	var scn: Node = load("res://scenes/arena.tscn").instantiate()
 	get_root().add_child(scn)
 	await process_frame

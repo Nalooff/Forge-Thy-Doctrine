@@ -69,5 +69,19 @@ func update(_delta: float) -> void:
 	for m in ship.mods_of("barrel"):
 		rng = minf(rng, float(m["ws"]["range"]) * 0.7) if rng < 1500.0 else float(m["ws"]["range"]) * 0.7
 	c["aim_target"] = t
-	c["fire"] = d < rng
+	var fixed := false
+	var spd := 700.0
+	for m in ship.mods_of("barrel"):
+		if not ship._mounted(m):
+			fixed = true
+			spd = float(m["ws"]["speed"]) if float(m["ws"]["speed"]) > 0.0 else 3000.0
+	var fire := d < rng
+	if fixed and ship.can_move():
+		var lead := Ship.lead_point(ship.global_position, spd, t.global_position, t.linear_velocity, ship.linear_velocity)
+		var ld := (lead - ship.global_position).normalized()
+		c["face"] = ld
+		if not c.has("v_target"):
+			c["v_target"] = ship.linear_velocity
+		fire = fire and ship.forward().angle_to(ld) < deg_to_rad(5.0)
+	c["fire"] = fire
 	ship.cmd = c

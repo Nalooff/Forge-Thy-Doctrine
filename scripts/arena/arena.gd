@@ -11,7 +11,8 @@ var paused := false
 var free_cursor := false
 var player_bp: Dictionary = {}
 var order := "none"
-var scores := [0, 0]
+var scores := {}
+var ruleset := "tdm"      # tdm = Team Deathmatch, elim = Team Elimination, dm = Deathmatch
 var kill_limit := 10
 var respawn_t := 0.0
 var respawn_delay := 5.0
@@ -29,7 +30,8 @@ func _ready() -> void:
 	var s: Dictionary = Game.session
 	mode = String(s.get("mode", "sandbox"))
 	player_bp = s.get("ship", Premades.dart())
-	kill_limit = int(s.get("kill_limit", 10))
+	ruleset = String(s.get("ruleset", "tdm"))
+	kill_limit = int(s.get("kill_limit", 30 if ruleset == "dm" else 10))
 	_tutorial = bool(s.get("tutorial", false))
 	_build_world()
 	rig = CamRig.new()
@@ -45,7 +47,7 @@ func _ready() -> void:
 		hud.log_msg("[b]Test range[/b]: spawn dummies, test-shoot your own hull, try the flight model.")
 		if _tutorial:
 			hud.log_msg("[color=yellow]Tutorial[/color]: 1) thrust with W/A/S/D, 2) press X to toggle assist, 3) press T to lock the dummy, 4) hold LMB to fire, 5) read module HP at left.")
-	hud.say("Mode: %s" % ("Test Range" if mode == "sandbox" else "Freematch - Team Deathmatch"), Color(0.6, 1.0, 0.8))
+	hud.say("Mode: %s" % ("Test Range" if mode == "sandbox" else "Freematch - " + _ruleset_name()), Color(1.0, 0.75, 0.3))
 
 
 # ------------------------------------------------------------------ world
@@ -148,23 +150,39 @@ func spawn_dummy(bp: Dictionary, behavior: String) -> void:
 	hud.log_msg("Dummy: %s (%s)" % [bp["name"], behavior])
 
 
+func _ruleset_name() -> String:
+	return {"tdm": "Team Deathmatch", "elim": "Team Elimination", "dm": "Deathmatch"}.get(ruleset, "Team Deathmatch")
+
+
 func _start_freematch() -> void:
 	var ally := int(Game.session.get("bots_ally", 1))
 	var enemy := int(Game.session.get("bots_enemy", 2))
 	_spawn_player(Vector3(0, 0, 1300), Vector3(0, 0, -1))
 	var lib: Array = Premades.all()
+	if ruleset == "dm":
+		for i in enemy:
+			_spawn_bot(i + 1, lib)
+		hud.log_msg("[b]Deathmatch[/b]: everyone for themselves, first to %d kills." % kill_limit)
+		return
 	for i in ally:
 		_spawn_bot(0, lib)
 	for i in enemy:
 		_spawn_bot(1, lib)
-	hud.log_msg("[b]Team Deathmatch[/b]: first team to %d kills wins." % kill_limit)
+	if ruleset == "elim":
+		hud.log_msg("[b]Team Elimination[/b]: one life each, last team standing wins.")
+	else:
+		hud.log_msg("[b]Team Deathmatch[/b]: first team to %d kills wins." % kill_limit)
 
 
 func _spawn_bot(team: int, lib: Array) -> void:
 	var bp: Dictionary = lib[randi() % lib.size()]
 	var z := 1300.0 if team == 0 else -1300.0
 	var pos := Vector3(randf_range(-250, 250), randf_range(-60, 60), z + randf_range(-150, 150))
-	var s := _spawn_ship(bp, team, pos, Vector3(0, 0, -1.0 if team == 0 else 1.0))
+	if ruleset == "dm":
+		var ang := float(team) * TAU / maxf(float(int(Game.session.get("bots_enemy", 2))), 1.0)
+		pos = Vector3(cos(ang), randf_range(-0.1, 0.1), sin(ang)) * 1300.0
+	var dir := (Vector3.ZERO - pos).normalized() if ruleset == "dm" else Vector3(0, 0, -1.0 if team == 0 else 1.0)
+	var s := _spawn_ship(bp, team, pos, dir)
 	bots.append(Bot.new(s, "hunter"))
 
 
@@ -186,16 +204,32 @@ func _on_player_hit(_s: Ship, r: Dictionary) -> void:
 		rig.shake(0.25)
 
 
+func _alive_teams() -> Array:
+	var t: Array = []
+	for n in get_tree().get_nodes_in_group("ships"):
+		var o := n as Ship
+		if o.alive and not (o.team in t):
+			t.append(o.team)
+	return t
+
+
+func _end_match(win: bool, text := "") -> void:
+	match_over = true
+	hud.say(("VICTORY" if win else "DEFEAT") if text == "" else text, Color(1.0, 0.8, 0.3) if win else Color(1, 0.3, 0.2))
+	hud.log_msg("Match over. Press ESC to leave.")
+
+
 func _on_died(s: Ship, k: Ship) -> void:
 	var who := "%s" % s.name
 	if k != null:
 		who += " destroyed by %s" % k.name
 	hud.log_msg("[color=yellow]%s[/color]" % who)
+	var respawns := ruleset != "elim"
 	if s == player:
 		hud.say("YOUR SHIP WAS DESTROYED", Color(1, 0.3, 0.3))
 		rig.first_person = false
 		_apply_mouse_mode()
-		if mode == "freematch" and not match_over:
+		if mode == "freematch" and not match_over and respawns:
 			respawn_t = 3.0 + float(s.stats["longest"]) / 10.0
 			hud.show_respawn(true, Game.all_ships())
 	if mode == "freematch" and not match_over:
@@ -203,20 +237,25 @@ func _on_died(s: Ship, k: Ship) -> void:
 		if k != null and k.team != s.team:
 			killer_team = k.team
 		elif k == null or k == s:
-			killer_team = 1 - s.team
-		if killer_team >= 0 and killer_team < 2:
-			scores[killer_team] += 1
-		if scores[0] >= kill_limit or scores[1] >= kill_limit:
-			match_over = true
-			var win: bool = scores[0] >= kill_limit
-			hud.say("VICTORY" if win else "DEFEAT", Color(0.5, 1, 0.5) if win else Color(1, 0.4, 0.4))
-			hud.log_msg("Match over. Press ESC to leave.")
-			return
-		if s != player:
-			var tm := s.team
+			killer_team = -2   # suicide / gave up
+		if ruleset != "elim" and killer_team >= 0:
+			scores[killer_team] = int(scores.get(killer_team, 0)) + 1
+		if ruleset == "elim":
+			var alive_teams := _alive_teams()
+			if alive_teams.size() <= 1:
+				var player_wins: bool = alive_teams.size() == 1 and alive_teams[0] == player.team
+				_end_match(player_wins, "VICTORY - last team standing" if player_wins else "DEFEAT - eliminated")
+				return
+		else:
+			for tm in scores.keys():
+				if int(scores[tm]) >= kill_limit:
+					_end_match(int(tm) == player.team)
+					return
+		if s != player and respawns:
+			var tm2 := s.team
 			get_tree().create_timer(4.0 + float(s.stats["longest"]) / 12.0).timeout.connect(func():
 				if not match_over:
-					_spawn_bot(tm, Premades.all()))
+					_spawn_bot(tm2, Premades.all()))
 	if s != player:
 		bots = bots.filter(func(b): return b.ship != s)
 		get_tree().create_timer(25.0).timeout.connect(func():
@@ -250,9 +289,30 @@ func repair_player() -> void:
 
 
 func score_text() -> String:
-	if mode == "freematch":
-		return "Kills  You/Allies: %d   Enemies: %d   (limit %d)" % [scores[0], scores[1], kill_limit]
-	return "Test range - no objectives."
+	if mode != "freematch":
+		return "Test range - no objectives."
+	match ruleset:
+		"elim":
+			var mine := 0
+			var theirs := 0
+			for n in get_tree().get_nodes_in_group("ships"):
+				if (n as Ship).team == player.team:
+					mine += 1
+				else:
+					theirs += 1
+			return "Alive  your team: %d   enemies: %d" % [mine, theirs]
+		"dm":
+			var best := 0
+			for tm in scores.keys():
+				if int(tm) != player.team:
+					best = maxi(best, int(scores[tm]))
+			return "Kills  you: %d   best rival: %d   (first to %d)" % [int(scores.get(player.team, 0)), best, kill_limit]
+		_:
+			var theirs2 := 0
+			for tm in scores.keys():
+				if int(tm) != player.team:
+					theirs2 += int(scores[tm])
+			return "Kills  your team: %d   enemies: %d   (limit %d)" % [int(scores.get(player.team, 0)), theirs2, kill_limit]
 
 
 # ------------------------------------------------------------------ controls

@@ -7,12 +7,20 @@ const DRAFTS := "user://drafts"
 var editing_bp: Dictionary = {}   # blueprint being edited (survives the trip to the test range)
 var session: Dictionary = {}      # data handed to the arena scene
 var settings := {"assist": true, "shake": true, "mouse_sens": 0.0022}
+var last_ship := {}               # {"name","source","path"} of the last ship loaded / saved / flown
+
+const LAST_FILE := "user://last_ship.json"
 
 
 func _ready() -> void:
 	DirAccess.make_dir_recursive_absolute(USER_SHIPS)
 	DirAccess.make_dir_recursive_absolute(DRAFTS)
 	_setup_input()
+	var f := FileAccess.open(LAST_FILE, FileAccess.READ)
+	if f:
+		var d = JSON.parse_string(f.get_as_text())
+		if typeof(d) == TYPE_DICTIONARY:
+			last_ship = d
 
 
 func _key(action: String, keys: Array) -> void:
@@ -87,3 +95,18 @@ func save_ship(bp: Dictionary, dir := USER_SHIPS) -> String:
 		return ""
 	f.store_string(JSON.stringify(bp, "\t"))
 	return path
+
+
+func set_last_ship(ship_name: String, source: String, path: String) -> void:
+	last_ship = {"name": ship_name, "source": source, "path": path}
+	var f := FileAccess.open(LAST_FILE, FileAccess.WRITE)
+	if f:
+		f.store_string(JSON.stringify(last_ship))
+
+
+## Blueprint of the last loaded ship (falls back to the first premade).
+func last_ship_bp() -> Dictionary:
+	for s in all_ships():
+		if s["name"] == last_ship.get("name", "") and s["source"] == last_ship.get("source", ""):
+			return s["bp"]
+	return Premades.dart()

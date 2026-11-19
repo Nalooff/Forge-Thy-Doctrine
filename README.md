@@ -38,21 +38,40 @@ Steps: **Hull -> Modules -> Links -> Interior -> Cosmetics -> Test**.
   and a live legality list. A ship must be fully legal to be saved or tested. Undo/redo, autosave drafts.
 * Saves are JSON in `user://ships` (shown in the menu).
 
-## What is implemented vs the design doc
-| Doc area | Status |
-|---|---|
-| 1 Ship creation: hull editing, modules, links, stats panel, legality, prefabs, undo | done (simplified: ring-loft hull, no interior) |
-| 1.4 Interior (corridors, doors, stairs) | not implemented (roadmap step 6) |
-| 2 Systems: power priority, thrusters + engine rooms, RCS 10%, gyro (torque ~ 1/mass) | done |
-| 3 Modes: Freematch (TDM) / Tutorial / Sandbox | done (Campaign, multiplayer: no) |
-| 4 Command: commander + first-person camera, console panels, radar, movement orders | done (Defense, Comms, Crew, Boarding, Hangar, AI modes listed but inert) |
-| 6 Damage: hull armor vs penetration, spatial module damage, ramming, 30 s shake lockout, commander-post death | done (no crew, repair, fires, breaches) |
-| Weapons: kinetic, laser, missiles (homing) | done; flak, mines, ammo bays: no |
-| 7 Tech: compound convex collision, no render tricks | done; floating origin / very large ships: no |
-| Multiplayer (lobby, netcode, community sharing) | not implemented |
+## Modules (current)
+Commander Post, Generator, Engine Room, Radar Room, Thruster, Barrel, plus the two turret modules:
+* **Turret Bay** (external): rotates the barrels that physically **touch** it, as one body, so aiming stays consistent.
+  It slews toward the aim point (or the lead point of a locked target) within a 75 degree cone, and a barrel will not fire
+  into its own hull.
+* **Turret Control** (internal): can be linked to **any** barrel, but those barrels stay fixed (aim by pointing the ship).
 
-Design simplifications you may want to revisit are noted in the code (e.g. forces are applied centrally -
-the gyro cancels thruster torque for free - and modules have no collision of their own).
+## Game modes (Freematch)
+Team Deathmatch (respawns, kill limit), Team Elimination (one life, last team standing), Deathmatch (free for all).
+Zone Control and Base Defense are not implemented.
+
+## Coverage of the base design doc
+| Base GDD area | Status |
+|---|---|
+| Ship creation: 5-step timeline, hull loft, loop cut, extrude, soft selection, mirror + centerline lock, history/undo, rulers (stat panel), grid snapping that adapts to size | done (ring-loft hull) |
+| View modifier: shaded / X-ray / wireframe + front, rear, side, top, perspective viewpoints | done |
+| Auto-Hull on invalid internal placement + hull clearance X slider | done |
+| Bevel/fillet (ring "round"), solidify (thickness) | partial |
+| Boolean ops, array mesh, curve deform, SubD, bridge loops, weld, blend surface, cross-section slices | not implemented |
+| Interior step (corridors, doors, stairs, ladders), stowage props, decals, camo | not implemented (colors only) |
+| Internal modules: Generator, Engine Room, Radar Room, Turret Control | done |
+| Internal modules: Defense Bay, Communication Room | not implemented |
+| External modules: Commander Post, Thruster, Barrel, Turret Bay | done |
+| External modules: Communication Dish, Breach Doors, Breach Pods, Hangar | not implemented |
+| Hidden systems: Electricity (priority by distance), RCS (10%), Gyro (1/mass), Radar | done |
+| Hidden systems: Heat, Oxygen, Crew, AI cores, Communication | not implemented |
+| Module links and damage propagation (Commander -> Engine/Turret/Radar, Engine -> Thruster, Bay/Control -> Barrel) | done |
+| Main menu (Multi Player / Single Player / Creation / Other with connector lines, last loaded ship) | done (Join/Host are info stubs) |
+| Multiplayer lobby, GameLobby interface, voice-to-text chat | not implemented |
+| Modes: Team Elimination, Team Deathmatch, Deathmatch | done (solo vs bots) |
+| Modes: Zone Control, Base Defense; the 30+ maps and their effects | not implemented (one asteroid arena) |
+| Controls: commander + first-person views, free-float cursor, damage flash + 30 s shake lockout | done |
+| Top ticker with comms/crew icons | partial (plain ticker) |
+| Console panels 1-5 incl. Exploded / Onion Slice 3D model, category tabs, 3D radar, objectives/log toggle | done; Combat/Movement sub-panels simplified; Crew Command, Defense, Boarding, Hangar listed but inert |
 
 ## Tests
 ```

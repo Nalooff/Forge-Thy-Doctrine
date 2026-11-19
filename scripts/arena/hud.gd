@@ -15,7 +15,7 @@ const MODE_NEEDS := {
 	"Hangar/Fleet": "a Hangar (roadmap step 7)", "AI/Auto": "AI core options (roadmap step 3+)",
 }
 const MOD_TABS := ["All", "Cmd", "Power", "Drive", "Arms", "Sens"]
-const MOD_CATEGORY := {"commander_post": 1, "generator": 2, "engine_room": 2, "thruster": 3, "turret_bay": 4, "barrel": 4, "radar_room": 5}
+const MOD_CATEGORY := {"commander_post": 1, "generator": 2, "engine_room": 2, "thruster": 3, "turret_bay": 4, "turret_control": 4, "barrel": 4, "radar_room": 5}
 
 const AMBER := Color(1.0, 0.66, 0.22)
 const ORANGE := Color(0.95, 0.42, 0.08)
@@ -608,7 +608,7 @@ class Radar3D extends Control:
 
 
 # ================================================================== theme + helpers
-func _make_theme() -> Theme:
+static func make_theme() -> Theme:
 	var t := Theme.new()
 	t.default_font_size = 11
 	for cls in ["Label", "Button", "CheckButton", "OptionButton", "RichTextLabel"]:
@@ -725,7 +725,7 @@ func setup(a) -> void:
 	root = Control.new()
 	root.set_anchors_preset(Control.PRESET_FULL_RECT)
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.theme = _make_theme()
+	root.theme = make_theme()
 	add_child(root)
 	overlay = Overlay.new()
 	(overlay as Overlay).hud = self
@@ -978,7 +978,7 @@ func bind_ship(s: Ship) -> void:
 	for c in mod_list.get_children():
 		c.queue_free()
 	rows.clear()
-	var order := ["commander_post", "generator", "engine_room", "thruster", "turret_bay", "barrel", "radar_room"]
+	var order := ["commander_post", "generator", "engine_room", "thruster", "turret_control", "turret_bay", "barrel", "radar_room"]
 	var sorted := s.mods.duplicate()
 	sorted.sort_custom(func(a, b): return order.find(a["type"]) < order.find(b["type"]))
 	for m in sorted:
@@ -1136,7 +1136,8 @@ func _refresh_sub() -> void:
 				if ship.module_online(m):
 					state = "[color=#ffe680]READY[/color]" if float(m["cool"]) <= 0.0 else "[color=#ff8030]CYCLING[/color]"
 				var ammo := "" if int(m["ammo"]) < 0 else "  ammo %d" % int(m["ammo"])
-				t += "Barrel #%d  %s  dmg %.0f  pen %.2f  %s%s\n" % [m["id"], String(ws["kind"]).to_upper(), ws["damage"], ws["pen"], state, ammo]
+				var mount_txt := "MOUNTED on bay #%d" % int(m["bay"]) if ship._mounted(m) else "FIXED"
+				t += "Barrel #%d  %s  %s  dmg %.0f  pen %.2f  %s%s\n" % [m["id"], String(ws["kind"]).to_upper(), mount_txt, ws["damage"], ws["pen"], state, ammo]
 			if ship.target != null and is_instance_valid(ship.target) and ship.target.alive:
 				t += "\nTarget: [color=#ffe680]%s[/color]  %d m  hull %d%%" % [ship.target.name, int(ship.global_position.distance_to(ship.target.global_position)), int(ship.target.hull_hp / ship.target.hull_hp_max * 100.0)]
 		"Sensors":
@@ -1199,7 +1200,13 @@ func is_mouse_over_ui() -> bool:
 func _objective_text() -> String:
 	var t := ""
 	if arena.mode == "freematch":
-		t = "OBJECTIVE\nDestroy the enemy fleet.\nFirst side to %d kills wins.\n\n" % arena.kill_limit
+		match arena.ruleset:
+			"elim":
+				t = "TEAM ELIMINATION\nOne life each. Be the last\nteam standing.\n\n"
+			"dm":
+				t = "DEATHMATCH\nEveryone is an enemy.\nFirst to %d kills wins.\n\n" % arena.kill_limit
+			_:
+				t = "TEAM DEATHMATCH\nUnlimited respawns. First\nteam to %d kills wins.\n\n" % arena.kill_limit
 	else:
 		t = "TEST RANGE\nNo objectives. Spawn dummies,\nfly, and fire at your own hull.\n\n"
 	return t + arena.score_text()
