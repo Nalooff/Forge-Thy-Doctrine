@@ -72,7 +72,7 @@ static func chamfer(w: float, h: float, c: float, o := 0.0) -> PackedVector2Arra
 
 
 static func outlined(ci: CanvasItem, text: String, pos: Vector2, size: int, col: Color, width := -1.0, align := HORIZONTAL_ALIGNMENT_LEFT) -> void:
-	var font := ThemeDB.fallback_font
+	var font: Font = UiStyle.display_font() if size >= 14 else UiStyle.body_font()
 	ci.draw_string_outline(font, pos, text, align, width, size, 3, Color(0, 0, 0, 0.95))
 	ci.draw_string(font, pos, text, align, width, size, col)
 
@@ -169,7 +169,7 @@ class ConsolePanel extends Control:
 				pl.append(poly[0])
 				draw_polyline(pl, Color(0, 0, 0), 2.5)
 				draw_polyline(pl, EMBER if active else ORANGE_DIM, 1.0)
-				var font := ThemeDB.fallback_font
+				var font: Font = UiStyle.body_font()
 				var tcol := Color(0.05, 0.02, 0.01) if active else AMBER
 				draw_string(font, Vector2(tx, y1 - 5), String(tabs[i]), HORIZONTAL_ALIGNMENT_CENTER, tw, 9, tcol)
 				_tab_rects.append(Rect2(tx, y0, tw, y1 - y0))
@@ -392,7 +392,7 @@ class Overlay extends Control:
 		if hud == null or hud.arena == null or hud.ship == null:
 			return
 		var cam: Camera3D = hud.arena.rig.cam
-		var font := ThemeDB.fallback_font
+		var font: Font = UiStyle.body_font()
 		if hud.arena.rig.first_person:
 			var c := size * 0.5
 			var col := Color(1.0, 0.75, 0.3, 0.9)
@@ -610,7 +610,8 @@ class Radar3D extends Control:
 # ================================================================== theme + helpers
 static func make_theme() -> Theme:
 	var t := Theme.new()
-	t.default_font_size = 11
+	t.default_font = UiStyle.body_font()
+	t.default_font_size = 12
 	for cls in ["Label", "Button", "CheckButton", "OptionButton", "RichTextLabel"]:
 		t.set_color("font_color", cls, AMBER)
 		t.set_color("font_outline_color", cls, Color(0, 0, 0, 0.95))

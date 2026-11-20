@@ -24,7 +24,7 @@ var opt_nodes: Array = []
 var main_btns: Array = []
 var active := ""
 var detail: Hud.ConsolePanel
-var font_i: FontVariation
+var font_i: Font
 
 
 class LineTree extends Control:
@@ -108,10 +108,7 @@ class HullPreview extends Control:
 
 func _ready() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-	font_i = FontVariation.new()
-	font_i.base_font = ThemeDB.fallback_font
-	font_i.variation_embolden = 0.55
-	font_i.variation_transform = Transform2D(Vector2(1, 0), Vector2(0.28, 1), Vector2.ZERO)
+	font_i = UiStyle.display_font(800)
 	_build_world()
 	ui = CanvasLayer.new()
 	add_child(ui)
@@ -189,7 +186,7 @@ func _menu_button(text: String, pos: Vector2, size: Vector2, border: Color, togg
 	b.focus_mode = Control.FOCUS_NONE
 	b.toggle_mode = toggle
 	b.add_theme_font_override("font", font_i)
-	b.add_theme_font_size_override("font_size", 22)
+	b.add_theme_font_size_override("font_size", 22 if size.x > 260.0 else 18)
 	b.add_theme_color_override("font_color", Hud.EMBER)
 	b.add_theme_color_override("font_hover_color", Color.WHITE)
 	b.add_theme_color_override("font_pressed_color", Color(0.06, 0.02, 0.01))

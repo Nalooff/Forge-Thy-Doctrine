@@ -117,9 +117,9 @@ func _after_load() -> void:
 func _build_world() -> void:
 	var env := Environment.new()
 	env.background_mode = Environment.BG_COLOR
-	env.background_color = Color(0.06, 0.07, 0.09)
+	env.background_color = Color(0.03, 0.02, 0.02)
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color = Color(0.5, 0.52, 0.6)
+	env.ambient_light_color = Color(0.62, 0.5, 0.44)
 	env.ambient_light_energy = 0.7
 	var we := WorldEnvironment.new()
 	we.environment = env
@@ -181,16 +181,7 @@ func _auto_snap() -> void:
 
 # ------------------------------------------------------------------ UI
 func _panel_style() -> StyleBoxFlat:
-	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(0.07, 0.09, 0.12, 0.9)
-	sb.border_color = Color(0.3, 0.5, 0.7, 0.8)
-	sb.set_border_width_all(1)
-	sb.set_corner_radius_all(4)
-	sb.content_margin_left = 8
-	sb.content_margin_right = 8
-	sb.content_margin_top = 6
-	sb.content_margin_bottom = 6
-	return sb
+	return UiStyle.panel()
 
 
 func _btn(text: String, parent: Control, cb: Callable) -> Button:
@@ -205,7 +196,7 @@ func _btn(text: String, parent: Control, cb: Callable) -> Button:
 func _lbl(text: String, parent: Control, size := 13) -> Label:
 	var l := Label.new()
 	l.text = text
-	l.add_theme_font_size_override("font_size", size)
+	l.add_theme_font_size_override("font_size", size + 4)
 	parent.add_child(l)
 	return l
 
@@ -214,13 +205,10 @@ class Timeline extends Control:
 	signal picked(step_name: String)
 	var steps: Array = []
 	var active := ""
-	var font: FontVariation
+	var font: Font
 
 	func _init() -> void:
-		font = FontVariation.new()
-		font.base_font = ThemeDB.fallback_font
-		font.variation_embolden = 0.5
-		font.variation_transform = Transform2D(Vector2(1, 0), Vector2(0.25, 1), Vector2.ZERO)
+		font = UiStyle.display_font(900)
 
 	func set_active(s: String) -> void:
 		active = s
@@ -281,6 +269,7 @@ func _build_ui() -> void:
 	var root := Control.new()
 	root.set_anchors_preset(Control.PRESET_FULL_RECT)
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.theme = UiStyle.editor_theme()
 	ui.add_child(root)
 
 	# ---- top bars (mock-up): row 1 = name/save/undo/redo/load | view settings | export/import
@@ -387,6 +376,8 @@ func _build_ui() -> void:
 	rv.add_child(maprow)
 	var mp := OptionButton.new()
 	mp.focus_mode = Control.FOCUS_NONE
+	mp.clip_text = true
+	mp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	for m in MAPS:
 		mp.add_item(m["name"])
 	mp.item_selected.connect(func(i: int): map_idx = i; _changed(false))
@@ -402,7 +393,7 @@ func _build_ui() -> void:
 	stats_lbl = RichTextLabel.new()
 	stats_lbl.bbcode_enabled = true
 	stats_lbl.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	stats_lbl.add_theme_font_size_override("normal_font_size", 13)
+	stats_lbl.add_theme_font_size_override("normal_font_size", 17)
 	rv.add_child(stats_lbl)
 
 	# ---- bottom: status/hint line and the step timeline
@@ -413,7 +404,7 @@ func _build_ui() -> void:
 	hint.offset_top = -(TL_H + 34)
 	hint.offset_left = 310
 	hint.offset_right = -340
-	hint.add_theme_font_size_override("font_size", 12)
+	hint.add_theme_font_size_override("font_size", 16)
 	hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(hint)
 	status = Label.new()
@@ -450,7 +441,7 @@ func _build_ui() -> void:
 	load_ov.add_child(cc)
 	var lpan := PanelContainer.new()
 	lpan.add_theme_stylebox_override("panel", _panel_style())
-	lpan.custom_minimum_size = Vector2(780, 500)
+	lpan.custom_minimum_size = Vector2(940, 500)
 	cc.add_child(lpan)
 	var lbox := VBoxContainer.new()
 	lpan.add_child(lbox)
@@ -1335,18 +1326,18 @@ func _rebuild_lines() -> void:
 	var L := float(stats["longest"])
 	if step == "Hull" or view_mode == 2:
 		for r in range(rings.size()):
-			var col := Color(1.0, 0.6, 0.2) if (r == sel_ring and step == "Hull") else Color(0.5, 0.55, 0.65)
+			var col := Color(1.0, 0.6, 0.2) if (r == sel_ring and step == "Hull") else Color(0.68, 0.52, 0.42)
 			for i in ShipData.RING_PTS:
 				_line(ShipData.ring_vertex(rings[r], i), ShipData.ring_vertex(rings[r], (i + 1) % ShipData.RING_PTS), col)
 			if r < rings.size() - 1:
 				for i in ShipData.RING_PTS:
-					_line(ShipData.ring_vertex(rings[r], i), ShipData.ring_vertex(rings[r + 1], i), Color(0.35, 0.4, 0.5))
+					_line(ShipData.ring_vertex(rings[r], i), ShipData.ring_vertex(rings[r + 1], i), Color(0.45, 0.3, 0.24))
 	if step == "Hull":
 		var b := ShipData.hull_bounds(rings)
 		var hy := b.size.y * 0.8
 		var z0 := b.position.z - L * 0.05
 		var z1 := b.end.z + L * 0.05
-		var mc := Color(0.4, 0.9, 1.0, 0.6) if mirror else Color(0.3, 0.3, 0.3)
+		var mc := Color(1.0, 0.7, 0.25, 0.6) if mirror else Color(0.3, 0.3, 0.3)
 		_line(Vector3(0, -hy, z0), Vector3(0, hy, z0), mc)
 		_line(Vector3(0, hy, z0), Vector3(0, hy, z1), mc)
 		_line(Vector3(0, hy, z1), Vector3(0, -hy, z1), mc)
@@ -1380,7 +1371,7 @@ func _rebuild_lines() -> void:
 func _update_stats() -> void:
 	var st := stats
 	var ok := issues.is_empty()
-	var t := "[b]Ship info[/b]\n[b]%s[/b]  -  [color=#8cf]%s[/color] (tier %d)\n" % [bp["name"], st["class"], st["tier"]]
+	var t := "[b]Ship info[/b]\n[b]%s[/b]  -  [color=#ffb347]%s[/color] (tier %d)\n" % [bp["name"], st["class"], st["tier"]]
 	t += "Size  %.1f x %.1f x %.1f m  (snap %.2f m)\n" % [st["length"], st["beam"], st["height"], snap]
 	t += "Mass  %.1f t   Hull armor %.2f\n" % [st["mass"], st["armor"]]
 	var cost_ok := float(st["cost"]) <= budget

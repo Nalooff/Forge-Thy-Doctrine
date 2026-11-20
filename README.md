@@ -81,6 +81,9 @@ godot --headless --path . --script res://tests/arena_test.gd -- freematch 40
 ```
 `tests/shot.gd` renders a scene to a PNG (needs a display: `xvfb-run ... --rendering-driver opengl3`).
 
+## Look and fonts
+`scripts/ui/ui_style.gd` holds the shared theme (black iron, ember orange, dark red borders) and fonts: Cinzel for titles/buttons, Barlow Condensed for text (SIL OFL 1.1, licenses in `assets/fonts/`).
+
 ## Layout
 * `scripts/ship/` data model (`ship_data.gd`), live ship (`ship.gd`), projectiles, premade ships
 * `scripts/editor/` ship forge, `scripts/arena/` arena + HUD + camera, `scripts/ai/` bots/autopilot

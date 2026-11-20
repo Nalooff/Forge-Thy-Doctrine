@@ -9,6 +9,7 @@ Last audit: 2026-11-20, against `docs/Forge_Thy_Doctrine.md` and the code in `sc
 ## DONE
 - Main menu: 4 buttons with connector lines, Join/Host/Campaign/Freematch/Tutorial/Sandbox tree, big spinning "last loaded ship" (no more corner card)
 - Ship Forge layout (mock-up): top bars (name/save/undo/redo/load, view settings, export/import), Type / Modifier / Helper tabs with a tools panel on the left, Ship info panel + Legal label, chevron step timeline at the bottom
+- Shared look (`scripts/ui/ui_style.gd`): black iron / ember orange / dark red like the main menu in the editor, menu and HUD; fonts Cinzel (titles, buttons, timeline) and Barlow Condensed (text), both OFL in `assets/fonts/`
 - Load popup (select a ship, copy scope, "Load as new ship (prefab)" vs "Modify this ship"), Import/Export of ship files, view settings (Full/X-ray/Wireframe, Perspective/Orthogonal, Camera presets)
 - Ship Forge: 6-step timeline (Hull, Modules, Links, Interior, Cosmetics, Test), ring-loft hull, vertex drag, mirror + centerline, soft selection, loop cut, extrude, scale, undo/redo, autosave drafts
 - View modifier (shaded / X-ray / wireframe + front, rear, side, top, perspective), grid snap and camera that adapt to ship size
