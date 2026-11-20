@@ -28,19 +28,21 @@ var font_i: Font
 
 
 class LineTree extends Control:
-	var segs: Array = []     # [Vector2 a, Vector2 b]
-	var t := 0.0
+	var segs: Array = []     # [Vector2 from, Vector2 to, float delay, float duration]
+	var t := 0.0             # seconds since the tree started growing
+
+	func _progress(sgm: Array) -> float:
+		return clampf((t - float(sgm[2])) / maxf(float(sgm[3]), 0.001), 0.0, 1.0)
 
 	func _draw() -> void:
 		for sgm in segs:
-			var a: Vector2 = sgm[0]
-			var b: Vector2 = sgm[1]
-			var e := a.lerp(b, t)
-			draw_line(a, e, Color(0, 0, 0, 0.9), 9.0)
+			var p := _progress(sgm)
+			if p > 0.0:
+				draw_line(sgm[0], (sgm[0] as Vector2).lerp(sgm[1], p), Color(0, 0, 0, 0.9), 9.0)
 		for sgm in segs:
-			var a2: Vector2 = sgm[0]
-			var b2: Vector2 = sgm[1]
-			draw_line(a2, a2.lerp(b2, t), RED, 5.0)
+			var p2 := _progress(sgm)
+			if p2 > 0.0:
+				draw_line(sgm[0], (sgm[0] as Vector2).lerp(sgm[1], p2), RED, 5.0)
 
 
 class HullPreview extends Control:
@@ -244,27 +246,42 @@ func _open(entry: String) -> void:
 	var spacing := 112.0
 	var start := clampf(by - float(n - 1) * spacing * 0.5, 160.0, 780.0 - float(n - 1) * spacing)
 	var spine_x := BTN_X + BTN_W + 55.0
-	var segs: Array = [[Vector2(BTN_X + BTN_W, by), Vector2(spine_x, by)]]
+	var speed := 900.0         # px/s the spine grows at
+	var stub_time := 0.2
+	var branch_time := 0.2
+	# 1) stub from the pressed button to the spine position
+	var segs: Array = [[Vector2(BTN_X + BTN_W, by), Vector2(spine_x, by), 0.0, stub_time]]
 	var ymin := by
 	var ymax := by
 	for i in range(n):
+		var oy0 := start + float(i) * spacing
+		ymin = minf(ymin, oy0)
+		ymax = maxf(ymax, oy0)
+	# 2) the spine spreads from the first bar, up and down at the same time
+	if ymin < by:
+		segs.append([Vector2(spine_x, by), Vector2(spine_x, ymin), stub_time, (by - ymin) / speed])
+	if ymax > by:
+		segs.append([Vector2(spine_x, by), Vector2(spine_x, ymax), stub_time, (ymax - by) / speed])
+	var total := stub_time
+	# 3) each branch leaves the spine as soon as the spine reaches its height
+	for i in range(n):
 		var oy := start + float(i) * spacing
-		ymin = minf(ymin, oy)
-		ymax = maxf(ymax, oy)
-		segs.append([Vector2(spine_x, oy), Vector2(OPT_X, oy)])
+		var delay := stub_time + absf(oy - by) / speed
+		segs.append([Vector2(spine_x, oy), Vector2(OPT_X, oy), delay, branch_time])
+		total = maxf(total, delay + branch_time)
 		var name: String = opts[i]
 		var b := _menu_button(name, Vector2(OPT_X, oy - OPT_H * 0.5), Vector2(OPT_W, OPT_H), RED)
 		b.modulate.a = 0.0
 		b.pressed.connect(func(): _on_option(entry, name))
 		opt_nodes.append(b)
 		var tw := b.create_tween()
-		tw.tween_interval(0.25 + 0.05 * i)
+		tw.tween_interval(delay + branch_time * 0.7)
 		tw.tween_property(b, "modulate:a", 1.0, 0.2)
-	segs.append([Vector2(spine_x, ymin), Vector2(spine_x, ymax)])
 	lines.segs = segs
 	lines.t = 0.0
+	lines.queue_redraw()
 	var tl := lines.create_tween()
-	tl.tween_method(func(v: float): lines.t = v; lines.queue_redraw(), 0.0, 1.0, 0.3)
+	tl.tween_method(func(v: float): lines.t = v; lines.queue_redraw(), 0.0, total, total)
 
 
 # ------------------------------------------------------------------ option actions
