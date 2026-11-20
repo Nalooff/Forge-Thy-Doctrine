@@ -28,7 +28,8 @@ The console is a black-iron and ember-orange command board laid out like the moc
 All 11 modes are listed; modes that depend on unimplemented systems say what they need.
 
 ### Ship editor
-Steps: **Hull -> Modules -> Links -> Interior -> Cosmetics -> Test**.
+Steps (chevron timeline at the bottom): **Hull -> Modules -> Links -> Interior -> Cosmetics -> Test**.
+Top bars: Save/Undo/Redo/Load, view settings (Full/X-ray/Wireframe, Perspective/Orthogonal, Camera), Export/Import. Second bar: **Type / Modifier / Helper** buttons open their tool tab on the left, the dropdown next to each picks which one (e.g. Type: Vertex or Ring). Load opens a popup: *Load as new ship (prefab)* leaves the prefab untouched on Save, *Modify this ship* overwrites it.
 * Hull: 8-point rings lofted into a closed hull. Drag vertices, mirror symmetry (X), soft selection,
   loop cut, extrude, scale, round, thickness. Snap and camera adapt to ship size.
 * Modules: Commander Post, Generator, Engine Room, Turret Bay, Radar Room (internal/external rules enforced),

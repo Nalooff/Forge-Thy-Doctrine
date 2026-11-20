@@ -8,6 +8,8 @@ Last audit: 2026-11-20, against `docs/Forge_Thy_Doctrine.md` and the code in `sc
 
 ## DONE
 - Main menu: 4 buttons with connector lines, Join/Host/Campaign/Freematch/Tutorial/Sandbox tree, big spinning "last loaded ship" (no more corner card)
+- Ship Forge layout (mock-up): top bars (name/save/undo/redo/load, view settings, export/import), Type / Modifier / Helper tabs with a tools panel on the left, Ship info panel + Legal label, chevron step timeline at the bottom
+- Load popup (select a ship, copy scope, "Load as new ship (prefab)" vs "Modify this ship"), Import/Export of ship files, view settings (Full/X-ray/Wireframe, Perspective/Orthogonal, Camera presets)
 - Ship Forge: 6-step timeline (Hull, Modules, Links, Interior, Cosmetics, Test), ring-loft hull, vertex drag, mirror + centerline, soft selection, loop cut, extrude, scale, undo/redo, autosave drafts
 - View modifier (shaded / X-ray / wireframe + front, rear, side, top, perspective), grid snap and camera that adapt to ship size
 - Stat panel (class from size, mass, cost, power, acceleration, polygon budget, legality list), a ship must be legal to save or test
@@ -21,6 +23,8 @@ Last audit: 2026-11-20, against `docs/Forge_Thy_Doctrine.md` and the code in `sc
 - Headless test suite (`tests/run_tests.gd`, 36 checks passing)
 
 ## IN WORK (code exists, not finished or not wired in)
+- Editor Type modes: only Vertex and Ring exist on the Hull step; Edge and Face are not implemented yet; Modifier/Helper lists are short (Mirror, Soft select, Thickness / Ruler, Frame view)
+- Editor Export saves the ship currently open (not a picker of several ships)
 - Hull tools: Bevel/fillet (ring "round") and Solidify (thickness) are partial
 - Top notification ticker: plain ticker, no comms/crew icons routing yet
 - Console sub-panels: Combat and Movement simplified; Tactical Map view not at GDD level

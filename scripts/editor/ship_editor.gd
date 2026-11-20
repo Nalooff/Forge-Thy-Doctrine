@@ -8,6 +8,17 @@ const MAPS := [
 	{"name": "Fleet map (up to Cruiser)", "tier": 6},
 	{"name": "Titan sea (all classes)", "tier": 8},
 ]
+const TABS := ["Type", "Modifier", "Helper"]
+const TL_H := 62.0
+const HELPERS := ["Ruler", "Frame view"]
+const MODES := {
+	"Hull": {"Type": ["Vertex", "Ring"], "Modifier": ["Mirror", "Soft select", "Thickness"], "Helper": HELPERS},
+	"Modules": {"Type": ["Module"], "Modifier": ["Auto-hull"], "Helper": HELPERS},
+	"Links": {"Type": ["Link"], "Modifier": ["Auto-link"], "Helper": HELPERS},
+	"Interior": {"Type": ["Corridor"], "Modifier": ["None"], "Helper": HELPERS},
+	"Cosmetics": {"Type": ["Paint"], "Modifier": ["None"], "Helper": HELPERS},
+	"Test": {"Type": ["Test range"], "Modifier": ["None"], "Helper": HELPERS},
+}
 const NICE := [0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 250.0, 500.0, 1000.0]
 
 var bp: Dictionary
@@ -44,8 +55,24 @@ var stats_lbl: RichTextLabel
 var hint: Label
 var status: Label
 var name_edit: LineEdit
-var pick_ships: OptionButton
-var scope_pick: OptionButton
+var tab := "Type"
+var tab_sel := {}           # "Step|Tab" -> chosen option index
+var mode_btns := {}
+var mode_opts := {}
+var left_panel: PanelContainer
+var left_title: Label
+var legal_lbl: Label
+var tl: Timeline
+var ortho := false
+var show_ruler := false
+var load_ov: ColorRect
+var load_list: ItemList
+var load_name: Label
+var load_scope: OptionButton
+var load_new: Button
+var load_mod: Button
+var file_dlg: FileDialog
+var _fd_action := ""
 var mod_list: ItemList
 var issues: Array = []
 var stats: Dictionary = {}
@@ -135,6 +162,9 @@ func _frame_camera() -> void:
 func _update_cam() -> void:
 	var off := Vector3(0, 0, cam_dist).rotated(Vector3.RIGHT, cam_pitch).rotated(Vector3.UP, cam_yaw)
 	cam.look_at_from_position(cam_target + off, cam_target, Vector3.UP)
+	cam.projection = Camera3D.PROJECTION_ORTHOGONAL if ortho else Camera3D.PROJECTION_PERSPECTIVE
+	if ortho:
+		cam.size = cam_dist * 1.5
 	cam.near = maxf(cam_dist * 0.002, 0.01)
 	cam.far = cam_dist * 200.0
 
@@ -180,6 +210,71 @@ func _lbl(text: String, parent: Control, size := 13) -> Label:
 	return l
 
 
+class Timeline extends Control:
+	signal picked(step_name: String)
+	var steps: Array = []
+	var active := ""
+	var font: FontVariation
+
+	func _init() -> void:
+		font = FontVariation.new()
+		font.base_font = ThemeDB.fallback_font
+		font.variation_embolden = 0.5
+		font.variation_transform = Transform2D(Vector2(1, 0), Vector2(0.25, 1), Vector2.ZERO)
+
+	func set_active(s: String) -> void:
+		active = s
+		queue_redraw()
+
+	func _gui_input(ev: InputEvent) -> void:
+		if ev is InputEventMouseButton and ev.pressed and ev.button_index == MOUSE_BUTTON_LEFT and steps.size() > 0:
+			var i := clampi(int(ev.position.x / (size.x / steps.size())), 0, steps.size() - 1)
+			picked.emit(steps[i])
+			accept_event()
+
+	func _draw() -> void:
+		var n := steps.size()
+		if n == 0:
+			return
+		var w := size.x / n
+		var h := size.y
+		var a := minf(h * 0.4, w * 0.25)
+		for i in n:
+			var x := i * w
+			var pts := PackedVector2Array([Vector2(x, 0), Vector2(x + w - a, 0), Vector2(x + w, h * 0.5), Vector2(x + w - a, h), Vector2(x, h)])
+			if i > 0:
+				pts.append(Vector2(x + a, h * 0.5))
+			var col := Color(0.93, 0.11, 0.14) if steps[i] == active else Color(1.0, 0.5, 0.15)
+			draw_colored_polygon(pts, col)
+			var outline := pts.duplicate()
+			outline.append(pts[0])
+			draw_polyline(outline, Color(0, 0, 0), 4.0)
+			var tx := x + (a if i > 0 else 14.0) + 6.0
+			draw_string(font, Vector2(tx, h * 0.5 + 9.0), steps[i], HORIZONTAL_ALIGNMENT_LEFT, w - a * 2.0, 26, Color(0.04, 0.02, 0.02))
+
+
+func _bar_box(parent: Control, ratio: float) -> HBoxContainer:
+	var pc := PanelContainer.new()
+	pc.add_theme_stylebox_override("panel", _panel_style())
+	pc.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	pc.size_flags_stretch_ratio = ratio
+	parent.add_child(pc)
+	var hb := HBoxContainer.new()
+	hb.add_theme_constant_override("separation", 6)
+	pc.add_child(hb)
+	return hb
+
+
+func _opt(items: Array, parent: Control, cb: Callable) -> OptionButton:
+	var ob := OptionButton.new()
+	ob.focus_mode = Control.FOCUS_NONE
+	for it in items:
+		ob.add_item(it)
+	ob.item_selected.connect(cb)
+	parent.add_child(ob)
+	return ob
+
+
 func _build_ui() -> void:
 	ui = CanvasLayer.new()
 	add_child(ui)
@@ -188,73 +283,94 @@ func _build_ui() -> void:
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	ui.add_child(root)
 
-	# top bar
-	var top := PanelContainer.new()
-	top.add_theme_stylebox_override("panel", _panel_style())
+	# ---- top bars (mock-up): row 1 = name/save/undo/redo/load | view settings | export/import
+	var top := VBoxContainer.new()
 	top.anchor_right = 1.0
 	top.offset_left = 6
 	top.offset_right = -6
 	top.offset_top = 6
+	top.add_theme_constant_override("separation", 4)
+	top.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(top)
-	var vt := VBoxContainer.new()
-	top.add_child(vt)
 	var row1 := HBoxContainer.new()
-	vt.add_child(row1)
-	_btn("< Menu", row1, func(): Game.editing_bp = {}; Game.goto_scene("res://scenes/main_menu.tscn"))
+	row1.add_theme_constant_override("separation", 4)
+	top.add_child(row1)
+	var box_a := _bar_box(row1, 36.0)
+	_btn("< Menu", box_a, func(): Game.editing_bp = {}; Game.goto_scene("res://scenes/main_menu.tscn"))
+	_lbl("Name :", box_a)
 	name_edit = LineEdit.new()
-	name_edit.custom_minimum_size = Vector2(160, 0)
+	name_edit.custom_minimum_size = Vector2(120, 0)
+	name_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	name_edit.text_changed.connect(func(t: String): bp["name"] = t; dirty_since_save = true)
-	row1.add_child(name_edit)
-	_btn("Save", row1, _save)
-	_btn("Undo", row1, _undo)
-	_btn("Redo", row1, _redo)
-	pick_ships = OptionButton.new()
-	row1.add_child(pick_ships)
-	scope_pick = OptionButton.new()
-	for s in ["Everything", "Hull + modules", "Hull only"]:
-		scope_pick.add_item(s)
-	row1.add_child(scope_pick)
-	_btn("New from prefab", row1, func(): _load_pick(true))
-	_btn("Open", row1, func(): _load_pick(false))
-	_refresh_ship_list()
-	var sp := Control.new()
-	sp.custom_minimum_size = Vector2(24, 0)
-	row1.add_child(sp)
-	for s in STEPS:
-		var ss: String = s
-		_btn(ss, row1, func(): _set_step(ss))
+	box_a.add_child(name_edit)
+	_btn("Save", box_a, _save)
+	_btn("Undo", box_a, _undo)
+	_btn("Redo", box_a, _redo)
+	_btn("Load", box_a, _open_load)
 
+	var box_b := _bar_box(row1, 27.0)
+	_lbl("View settings", box_b, 12)
+	_opt(["Full", "X-ray", "Wireframe"], box_b, func(i: int): view_mode = i; _changed(false))
+	_opt(["Perspective", "Orthogonal"], box_b, func(i: int): ortho = (i == 1))
+	var cm := MenuButton.new()
+	cm.text = "Camera"
+	cm.flat = false
+	cm.focus_mode = Control.FOCUS_NONE
+	var views := [["Top", 0.0, -1.5], ["Bottom", 0.0, 1.5], ["Side right", PI * 0.5, 0.0], ["Side left", -PI * 0.5, 0.0],
+		["Front", PI, 0.0], ["Rear", 0.0, 0.0], ["Default 3/4", 0.8, -0.4]]
+	for i in views.size():
+		cm.get_popup().add_item(views[i][0], i)
+	cm.get_popup().id_pressed.connect(func(id: int): cam_yaw = views[id][1]; cam_pitch = views[id][2])
+	box_b.add_child(cm)
+
+	var box_c := _bar_box(row1, 37.0)
+	box_c.alignment = BoxContainer.ALIGNMENT_CENTER
+	_btn("Export", box_c, _export)
+	_btn("Import", box_c, _import)
+
+	# ---- row 2: Type / Modifier / Helper (button = show its tab on the left, dropdown = which one) | legal
 	var row2 := HBoxContainer.new()
-	vt.add_child(row2)
-	_lbl("View:", row2, 12)
-	var vm := OptionButton.new()
-	for v in ["Shaded", "X-ray", "Wireframe"]:
-		vm.add_item(v)
-	vm.item_selected.connect(func(i: int): view_mode = i; _changed(false))
-	row2.add_child(vm)
-	for pv in [["Perspective", 0.8, -0.4], ["Front", PI, 0.0], ["Rear", 0.0, 0.0], ["Side", PI * 0.5, 0.0], ["Top", 0.0, -1.5]]:
-		var yaw_v: float = pv[1]
-		var pit_v: float = pv[2]
-		_btn(pv[0], row2, func(): cam_yaw = yaw_v; cam_pitch = pit_v)
-	_lbl("   Hint: drag RMB orbit, MMB pan, wheel zoom", row2, 11)
+	row2.add_theme_constant_override("separation", 4)
+	top.add_child(row2)
+	var box_d := _bar_box(row2, 63.0)
+	for t in TABS:
+		var tt: String = t
+		var tb := Button.new()
+		tb.text = tt + " :"
+		tb.toggle_mode = true
+		tb.focus_mode = Control.FOCUS_NONE
+		tb.pressed.connect(func(): _pick_tab(tt))
+		box_d.add_child(tb)
+		mode_btns[tt] = tb
+		mode_opts[tt] = _opt([], box_d, func(i: int): _pick_mode(tt, i))
+		if tt != "Helper":
+			box_d.add_child(VSeparator.new())
+	var box_e := _bar_box(row2, 37.0)
+	box_e.alignment = BoxContainer.ALIGNMENT_CENTER
+	legal_lbl = _lbl("", box_e, 15)
 
-	# left tools
-	var lp := PanelContainer.new()
-	lp.add_theme_stylebox_override("panel", _panel_style())
-	lp.anchor_bottom = 1.0
-	lp.offset_left = 6
-	lp.offset_right = 300
-	lp.offset_top = 96
-	lp.offset_bottom = -34
-	root.add_child(lp)
+	# ---- left tools tab
+	left_panel = PanelContainer.new()
+	left_panel.add_theme_stylebox_override("panel", _panel_style())
+	left_panel.anchor_bottom = 1.0
+	left_panel.offset_left = 6
+	left_panel.offset_right = 300
+	left_panel.offset_top = 96
+	left_panel.offset_bottom = -(TL_H + 40)
+	root.add_child(left_panel)
+	var lv := VBoxContainer.new()
+	left_panel.add_child(lv)
+	left_title = _lbl("", lv, 15)
+	left_title.add_theme_color_override("font_color", Color(1.0, 0.6, 0.25))
 	var sc := ScrollContainer.new()
-	lp.add_child(sc)
+	sc.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	lv.add_child(sc)
 	tools = VBoxContainer.new()
 	tools.custom_minimum_size = Vector2(270, 0)
 	tools.add_theme_constant_override("separation", 4)
 	sc.add_child(tools)
 
-	# right stat panel
+	# ---- right ship info panel
 	var rp := PanelContainer.new()
 	rp.add_theme_stylebox_override("panel", _panel_style())
 	rp.anchor_left = 1.0
@@ -263,13 +379,14 @@ func _build_ui() -> void:
 	rp.offset_left = -330
 	rp.offset_right = -6
 	rp.offset_top = 96
-	rp.offset_bottom = -34
+	rp.offset_bottom = -(TL_H + 40)
 	root.add_child(rp)
 	var rv := VBoxContainer.new()
 	rp.add_child(rv)
 	var maprow := HBoxContainer.new()
 	rv.add_child(maprow)
 	var mp := OptionButton.new()
+	mp.focus_mode = Control.FOCUS_NONE
 	for m in MAPS:
 		mp.add_item(m["name"])
 	mp.item_selected.connect(func(i: int): map_idx = i; _changed(false))
@@ -288,12 +405,12 @@ func _build_ui() -> void:
 	stats_lbl.add_theme_font_size_override("normal_font_size", 13)
 	rv.add_child(stats_lbl)
 
-	# bottom bar
+	# ---- bottom: status/hint line and the step timeline
 	hint = Label.new()
 	hint.anchor_top = 1.0
 	hint.anchor_bottom = 1.0
 	hint.anchor_right = 1.0
-	hint.offset_top = -30
+	hint.offset_top = -(TL_H + 34)
 	hint.offset_left = 310
 	hint.offset_right = -340
 	hint.add_theme_font_size_override("font_size", 12)
@@ -302,45 +419,174 @@ func _build_ui() -> void:
 	status = Label.new()
 	status.anchor_top = 1.0
 	status.anchor_bottom = 1.0
-	status.offset_top = -30
+	status.offset_top = -(TL_H + 34)
 	status.offset_left = 10
 	status.add_theme_color_override("font_color", Color(1, 0.9, 0.5))
 	status.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(status)
+	tl = Timeline.new()
+	tl.steps = STEPS
+	tl.anchor_top = 1.0
+	tl.anchor_bottom = 1.0
+	tl.anchor_right = 1.0
+	tl.offset_left = 6
+	tl.offset_right = -6
+	tl.offset_top = -(TL_H + 4)
+	tl.offset_bottom = -4
+	tl.mouse_filter = Control.MOUSE_FILTER_STOP
+	tl.picked.connect(_set_step)
+	root.add_child(tl)
+
+	# ---- Load popup
+	load_ov = ColorRect.new()
+	load_ov.color = Color(0, 0, 0, 0.55)
+	load_ov.set_anchors_preset(Control.PRESET_FULL_RECT)
+	load_ov.mouse_filter = Control.MOUSE_FILTER_STOP
+	load_ov.visible = false
+	root.add_child(load_ov)
+	var cc := CenterContainer.new()
+	cc.set_anchors_preset(Control.PRESET_FULL_RECT)
+	cc.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	load_ov.add_child(cc)
+	var lpan := PanelContainer.new()
+	lpan.add_theme_stylebox_override("panel", _panel_style())
+	lpan.custom_minimum_size = Vector2(780, 500)
+	cc.add_child(lpan)
+	var lbox := VBoxContainer.new()
+	lpan.add_child(lbox)
+	_lbl("LOAD A SHIP", lbox, 16).add_theme_color_override("font_color", Color(1.0, 0.6, 0.25))
+	load_list = ItemList.new()
+	load_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	load_list.item_selected.connect(_on_load_selected)
+	lbox.add_child(load_list)
+	var bb := HBoxContainer.new()
+	lbox.add_child(bb)
+	load_name = _lbl("(select a ship)", bb, 14)
+	load_name.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	load_name.clip_text = true
+	_lbl("Copy:", bb, 12)
+	load_scope = _opt(["Everything", "Hull + modules", "Hull only"], bb, func(_i: int): pass)
+	load_new = _btn("Load as new ship (prefab)", bb, func(): _load_pick(true))
+	load_new.tooltip_text = "Starts a new ship from this prefab. Save adds a new ship; the prefab is not changed."
+	load_mod = _btn("Modify this ship", bb, func(): _load_pick(false))
+	load_mod.tooltip_text = "Edits this ship. Save overwrites it."
+	load_new.disabled = true
+	load_mod.disabled = true
+	_btn("Close", bb, func(): load_ov.visible = false)
+
+	file_dlg = FileDialog.new()
+	file_dlg.access = FileDialog.ACCESS_FILESYSTEM
+	file_dlg.use_native_dialog = true
+	file_dlg.filters = PackedStringArray(["*.json ; Forge Thy Doctrine ship"])
+	file_dlg.file_selected.connect(_on_file_picked)
+	add_child(file_dlg)
+	_refresh_ship_list()
 
 
 func say(t: String) -> void:
 	status.text = t
 
 
+# ------------------------------------------------------------------ load / import / export
 func _refresh_ship_list() -> void:
-	pick_ships.clear()
 	_ship_cache = Game.all_ships()
+	load_list.clear()
 	for s in _ship_cache:
-		pick_ships.add_item("%s (%s)" % [s["name"], s["source"]])
+		load_list.add_item("%s   (%s)" % [s["name"], s["source"]])
+	load_name.text = "(select a ship)"
+	load_new.disabled = true
+	load_mod.disabled = true
+
+
+func _open_load() -> void:
+	_refresh_ship_list()
+	load_ov.visible = true
+
+
+func _on_load_selected(_i: int) -> void:
+	var sel := load_list.get_selected_items()
+	if sel.is_empty():
+		return
+	var ent: Dictionary = _ship_cache[sel[0]]
+	load_name.text = "%s  (%s)" % [ent["name"], ent["source"]]
+	load_new.disabled = false
+	load_mod.disabled = false
 
 
 func _load_pick(as_prefab: bool) -> void:
-	if pick_ships.selected < 0 or pick_ships.selected >= _ship_cache.size():
+	var sel := load_list.get_selected_items()
+	if sel.is_empty():
 		return
 	_push_undo()
-	var src: Dictionary = (_ship_cache[pick_ships.selected]["bp"] as Dictionary).duplicate(true)
+	var ent: Dictionary = _ship_cache[sel[0]]
+	var src: Dictionary = (ent["bp"] as Dictionary).duplicate(true)
 	if as_prefab:
 		src["name"] = String(src["name"]) + " copy"
 		src["author"] = ""
-		var scope := scope_pick.selected
+		var scope := load_scope.selected
+		if scope == 2:
+			src["modules"] = []
 		if scope >= 1:
-			if scope == 2:
-				src["modules"] = []
-			src["links"] = []
-		if scope == 1:
 			src["links"] = []
 	bp = ShipData.normalize(src)
 	if not as_prefab:
-		var ent: Dictionary = _ship_cache[pick_ships.selected]
 		Game.set_last_ship(ent["name"], ent["source"], ent["path"])
+	load_ov.visible = false
 	_after_load()
-	say("Loaded %s" % bp["name"])
+	if as_prefab:
+		say("New ship started from prefab %s - Save will add a new ship." % ent["name"])
+	elif ent["source"] == "premade":
+		say("Premade ships cannot be overwritten: Save will add your own ship with this name.")
+	else:
+		say("Modifying %s - Save will overwrite it." % bp["name"])
+
+
+func _export() -> void:
+	if not issues.is_empty():
+		say("Cannot export: the ship must be fully legal (see the red items).")
+		return
+	_fd_action = "export"
+	file_dlg.file_mode = FileDialog.FILE_MODE_SAVE_FILE
+	file_dlg.title = "Export ship"
+	file_dlg.current_file = String(bp["name"]).validate_filename() + ".json"
+	file_dlg.popup_centered_ratio(0.7)
+
+
+func _import() -> void:
+	_fd_action = "import"
+	file_dlg.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+	file_dlg.title = "Import ship"
+	file_dlg.popup_centered_ratio(0.7)
+
+
+func _on_file_picked(path: String) -> void:
+	if _fd_action == "export":
+		var f := FileAccess.open(path, FileAccess.WRITE)
+		if f == null:
+			say("Export failed: cannot write %s" % path)
+			return
+		f.store_string(JSON.stringify(bp, "\t"))
+		say("Exported to %s" % path)
+		return
+	var d := Game.load_ship_file(path)
+	if d.is_empty():
+		say("Import failed: this is not a valid ship file.")
+		return
+	if not ShipData.validate(d).is_empty():
+		say("Import refused: this ship is not legal in this version of the game.")
+		return
+	var taken := {}
+	for s in Game.all_ships():
+		taken[s["name"]] = true
+	var nm: String = d["name"]
+	while taken.has(nm):
+		nm += " (imported)"
+	d["name"] = nm
+	if Game.save_ship(d) == "":
+		say("Import failed: could not save the ship.")
+		return
+	_refresh_ship_list()
+	say("Imported %s - open it with Load." % nm)
 
 
 func _save() -> void:
@@ -357,10 +603,60 @@ func _save() -> void:
 	say("Saved to %s" % ProjectSettings.globalize_path(path))
 
 
+# ------------------------------------------------------------------ steps, Type / Modifier / Helper
+func _mode_value(t: String) -> String:
+	var opts: Array = MODES[step][t]
+	var i := clampi(int(tab_sel.get(step + "|" + t, 0)), 0, opts.size() - 1)
+	return opts[i]
+
+
+func _sync_modes() -> void:
+	for t in TABS:
+		var ob: OptionButton = mode_opts[t]
+		ob.clear()
+		for o in MODES[step][t]:
+			ob.add_item(o)
+		ob.select(clampi(int(tab_sel.get(step + "|" + t, 0)), 0, ob.item_count - 1))
+	_apply_type_mode()
+	_sync_tab_buttons()
+
+
+func _apply_type_mode() -> void:
+	ring_mode = step == "Hull" and _mode_value("Type") == "Ring"
+	sel_vert = -1
+
+
+func _sync_tab_buttons() -> void:
+	for t in TABS:
+		(mode_btns[t] as Button).set_pressed_no_signal(left_panel.visible and tab == t)
+
+
+func _pick_tab(t: String) -> void:
+	if tab == t and left_panel.visible:
+		left_panel.visible = false
+	else:
+		tab = t
+		left_panel.visible = true
+	_sync_tab_buttons()
+	_build_tools()
+
+
+func _pick_mode(t: String, i: int) -> void:
+	tab_sel[step + "|" + t] = i
+	if t == "Type":
+		_apply_type_mode()
+	tab = t
+	left_panel.visible = true
+	_sync_tab_buttons()
+	_build_tools()
+	_changed(false)
+
+
 func _set_step(s: String) -> void:
 	step = s
 	link_from = -1
-	_build_tools()
+	tl.set_active(s)
+	_sync_modes()
 	var hints := {
 		"Hull": "LMB on a vertex: select/drag (mirror keeps symmetry). Arrows = X/Y, PageUp/PageDown = ring Z. RMB orbit, MMB/Shift+RMB pan, wheel zoom. Ctrl+Z undo.",
 		"Modules": "LMB a module to select and drag it (camera plane). Arrows/PageUp/PageDown nudge. Red outline = minimum size. White line = facing.",
@@ -370,6 +666,7 @@ func _set_step(s: String) -> void:
 		"Test": "Launch the solo test range: place a dummy, shoot your own hull, test flight.",
 	}
 	hint.text = hints[s]
+	_build_tools()
 	_changed(false)
 
 
@@ -378,52 +675,105 @@ func _build_tools() -> void:
 	for c in tools.get_children():
 		c.queue_free()
 	_size_spins.clear()
-	_lbl("STEP: " + step.to_upper(), tools, 15).add_theme_color_override("font_color", Color(0.5, 0.85, 1.0))
-	match step:
-		"Hull":
-			_tools_hull()
-		"Modules":
-			_tools_modules()
-		"Links":
-			_tools_links()
-		"Interior":
-			_lbl("Not in this prototype.\n\nPlanned: entrances on internal modules,\ncorridors with bend points, doors,\nauto slope -> stairs -> ladder.", tools)
-		"Cosmetics":
-			_tools_cosmetics()
-		"Test":
-			_tools_test()
+	var v := _mode_value(tab)
+	left_title.text = ("%s : %s" % [tab, v]).to_upper()
+	match tab:
+		"Type":
+			match step:
+				"Hull":
+					if v == "Vertex":
+						_tools_hull_vertex()
+					else:
+						_tools_hull_ring()
+				"Modules":
+					_tools_mod_type()
+				"Links":
+					_tools_links()
+				"Interior":
+					_lbl("Not in this prototype.\n\nPlanned: entrances on internal modules,\ncorridors with bend points, doors,\nauto slope -> stairs -> ladder.", tools)
+				"Cosmetics":
+					_tools_cosmetics()
+				"Test":
+					_tools_test()
+		"Modifier":
+			_tools_modifier(v)
+		"Helper":
+			_tools_helper(v)
 	_building_ui = false
 
 
-func _tools_hull() -> void:
+func _check(text: String, on: bool, cb: Callable) -> CheckButton:
 	var ck := CheckButton.new()
-	ck.text = "Mirror symmetry (X)"
-	ck.button_pressed = mirror
+	ck.text = text
+	ck.button_pressed = on
 	ck.focus_mode = Control.FOCUS_NONE
-	ck.toggled.connect(func(on: bool): mirror = on)
+	ck.toggled.connect(cb)
 	tools.add_child(ck)
-	var cs := CheckButton.new()
-	cs.text = "Soft selection (proportional)"
-	cs.button_pressed = soft
-	cs.focus_mode = Control.FOCUS_NONE
-	cs.toggled.connect(func(on: bool): soft = on)
-	tools.add_child(cs)
-	var cr := CheckButton.new()
-	cr.text = "Select whole ring"
-	cr.button_pressed = ring_mode
-	cr.focus_mode = Control.FOCUS_NONE
-	cr.toggled.connect(func(on: bool): ring_mode = on; sel_vert = -1; _changed(false))
-	tools.add_child(cr)
+	return ck
+
+
+func _tools_modifier(v: String) -> void:
+	match v:
+		"Mirror":
+			_check("Mirror symmetry (X)", mirror, func(on: bool): mirror = on; _changed(false))
+			_lbl("Sculpt one side, the other follows.\nVertices cannot cross the centerline.", tools, 11)
+		"Soft select":
+			_check("Soft selection (proportional)", soft, func(on: bool): soft = on)
+			_lbl("Moving a vertex drags its neighbours\nsmoothly along with it.", tools, 11)
+		"Thickness":
+			var tr := HBoxContainer.new()
+			tools.add_child(tr)
+			_lbl("Thickness (m)", tr, 12)
+			var ts := HSlider.new()
+			ts.min_value = 0.02
+			ts.max_value = 1.5
+			ts.step = 0.01
+			ts.value = float(bp["thickness"])
+			ts.custom_minimum_size = Vector2(130, 18)
+			ts.value_changed.connect(func(x: float): if not _building_ui: _push_undo(); bp["thickness"] = x; _changed())
+			tr.add_child(ts)
+			_lbl("Thicker armor = tougher but heavier and\nmore expensive.", tools, 11)
+		"Auto-hull":
+			_tools_mod_autohull()
+		"Auto-link":
+			_btn("Auto-link everything", tools, func(): _push_undo(); ShipData.auto_link(bp); _changed(); _build_tools())
+			_btn("Clear all links", tools, func(): _push_undo(); bp["links"] = []; _changed(); _build_tools())
+		_:
+			_lbl("No modifier for this step yet.", tools, 12)
+
+
+func _tools_helper(v: String) -> void:
+	match v:
+		"Ruler":
+			_check("Show bounding box", show_ruler, func(on: bool): show_ruler = on; _changed(false))
+			var st := stats
+			if not st.is_empty():
+				_lbl("Length  %.2f m\nBeam    %.2f m\nHeight  %.2f m\nGrid snap %.2f m (adapts to ship size)" % [st["length"], st["beam"], st["height"], snap], tools, 12)
+		"Frame view":
+			_btn("Frame the whole ship", tools, _frame_camera)
+
+
+func _ring_nav() -> void:
 	var rr := HBoxContainer.new()
 	tools.add_child(rr)
 	_btn("< Ring", rr, func(): sel_ring = maxi(sel_ring - 1, 0); sel_vert = -1; _changed(false))
 	_btn("Ring >", rr, func(): sel_ring = mini(sel_ring + 1, bp["rings"].size() - 1); sel_vert = -1; _changed(false))
+
+
+func _tools_hull_vertex() -> void:
+	_lbl("Click a vertex of the selected ring to move it\n(mirror keeps it symmetric).", tools, 11)
+	_ring_nav()
 	_btn("Loop cut (after ring)", tools, _loop_cut)
 	var ex := HBoxContainer.new()
 	tools.add_child(ex)
 	_btn("Extrude nose", ex, func(): _extrude(true))
 	_btn("Extrude tail", ex, func(): _extrude(false))
 	_btn("Delete ring", tools, _delete_ring)
+
+
+func _tools_hull_ring() -> void:
+	_lbl("Clicking selects the whole ring.", tools, 11)
+	_ring_nav()
 	_lbl("Ring tools (selected ring)", tools, 12)
 	var sr := HBoxContainer.new()
 	tools.add_child(sr)
@@ -441,25 +791,13 @@ func _tools_hull() -> void:
 	tools.add_child(sh)
 	_btn("Scale x1.1", sh, func(): _scale_hull(1.1))
 	_btn("Scale x0.9", sh, func(): _scale_hull(0.9))
-	_btn("Frame view", sh, _frame_camera)
-	var tr := HBoxContainer.new()
-	tools.add_child(tr)
-	_lbl("Thickness (m)", tr, 12)
-	var ts := HSlider.new()
-	ts.min_value = 0.02
-	ts.max_value = 1.5
-	ts.step = 0.01
-	ts.value = float(bp["thickness"])
-	ts.custom_minimum_size = Vector2(130, 18)
-	ts.value_changed.connect(func(v: float): if not _building_ui: _push_undo(); bp["thickness"] = v; _changed())
-	tr.add_child(ts)
-	_lbl("Thicker armor = tougher but heavier and\nmore expensive.", tools, 11)
 
 
-func _tools_modules() -> void:
+func _tools_mod_type() -> void:
 	var tr := HBoxContainer.new()
 	tools.add_child(tr)
 	var tp := OptionButton.new()
+	tp.focus_mode = Control.FOCUS_NONE
 	var types: Array = ShipData.MODULES.keys()
 	for t in types:
 		tp.add_item(ShipData.MODULES[t]["label"])
@@ -470,13 +808,11 @@ func _tools_modules() -> void:
 	mod_list.item_selected.connect(func(i: int): sel_mod = int(mod_list.get_item_metadata(i)); _build_tools(); _changed(false))
 	tools.add_child(mod_list)
 	_fill_mod_list()
-	var ah := CheckButton.new()
-	ah.text = "Auto-hull on invalid placement"
-	ah.button_pressed = auto_hull_on
-	ah.focus_mode = Control.FOCUS_NONE
-	ah.add_theme_font_size_override("font_size", 12)
-	ah.toggled.connect(func(on: bool): auto_hull_on = on)
-	tools.add_child(ah)
+	_tools_mod_detail()
+
+
+func _tools_mod_autohull() -> void:
+	_check("Auto-hull on invalid placement", auto_hull_on, func(on: bool): auto_hull_on = on)
 	var hr := HBoxContainer.new()
 	tools.add_child(hr)
 	_lbl("Hull clearance X (m)", hr, 12)
@@ -488,6 +824,14 @@ func _tools_modules() -> void:
 	hsl.custom_minimum_size = Vector2(110, 18)
 	hsl.value_changed.connect(func(v: float): hull_clear = v)
 	hr.add_child(hsl)
+	var m := ShipData.get_module(bp, sel_mod) if sel_mod >= 0 else {}
+	if not m.is_empty() and ShipData.MODULES[m["type"]]["kind"] == "internal":
+		_btn("Auto-hull: enclose selected module", tools, func(): _push_undo(); _auto_hull_module(sel_mod))
+	else:
+		_lbl("Select an internal module (Type tab) to\nenclose it with the hull.", tools, 11)
+
+
+func _tools_mod_detail() -> void:
 	if sel_mod < 0 or ShipData.get_module(bp, sel_mod).is_empty():
 		_lbl("Select a module (list or click in 3D).", tools, 12)
 		return
@@ -1007,6 +1351,9 @@ func _rebuild_lines() -> void:
 		_line(Vector3(0, hy, z0), Vector3(0, hy, z1), mc)
 		_line(Vector3(0, hy, z1), Vector3(0, -hy, z1), mc)
 		_line(Vector3(0, -hy, z1), Vector3(0, -hy, z0), mc)
+	if show_ruler:
+		var rb := ShipData.hull_bounds(rings)
+		_box_lines(rb.get_center(), rb.size, Color(0.3, 1.0, 0.5))
 	_line(Vector3.ZERO, Vector3(L * 0.15, 0, 0), Color.RED)
 	_line(Vector3.ZERO, Vector3(0, L * 0.15, 0), Color.GREEN)
 	_line(Vector3.ZERO, Vector3(0, 0, -L * 0.15), Color(0.4, 0.5, 1.0))
@@ -1033,7 +1380,7 @@ func _rebuild_lines() -> void:
 func _update_stats() -> void:
 	var st := stats
 	var ok := issues.is_empty()
-	var t := "[b]%s[/b]  -  [color=#8cf]%s[/color] (tier %d)\n" % [bp["name"], st["class"], st["tier"]]
+	var t := "[b]Ship info[/b]\n[b]%s[/b]  -  [color=#8cf]%s[/color] (tier %d)\n" % [bp["name"], st["class"], st["tier"]]
 	t += "Size  %.1f x %.1f x %.1f m  (snap %.2f m)\n" % [st["length"], st["beam"], st["height"], snap]
 	t += "Mass  %.1f t   Hull armor %.2f\n" % [st["mass"], st["armor"]]
 	var cost_ok := float(st["cost"]) <= budget
@@ -1042,13 +1389,12 @@ func _update_stats() -> void:
 	t += "Power [color=%s]%.0f MW out, %.0f idle, %.0f peak[/color]\n" % ["#6f6" if pwr_ok else "#f66", st["power_out"], st["power_idle"], st["power_peak"]]
 	t += "Accel fwd %.1f m/s2   RCS %.0f kN   gyro %.2f rad/s2\n" % [st["accel_fwd"], st["rcs"], st["gyro"]]
 	var tri_ok := int(st["tris"]) <= int(st["tri_budget"])
-	t += "Polys [color=%s]%d / %d[/color]\n\n" % ["#6f6" if tri_ok else "#f66", st["tris"], st["tri_budget"]]
-	if ok:
-		t += "[color=#6f6][b]LEGAL[/b] - playable, can be saved[/color]"
-	else:
-		t += "[color=#f66][b]NOT LEGAL[/b][/color]\n"
+	t += "Polys [color=%s]%d / %d[/color]\n" % ["#6f6" if tri_ok else "#f66", st["tris"], st["tri_budget"]]
+	if not ok:
 		for i in issues:
 			t += "[color=#f88]- %s[/color]\n" % i["msg"]
+	legal_lbl.text = "LEGAL - playable, can be saved" if ok else "NOT LEGAL (%d issue%s)" % [issues.size(), "" if issues.size() == 1 else "s"]
+	legal_lbl.add_theme_color_override("font_color", Color(0.4, 1.0, 0.45) if ok else Color(1.0, 0.4, 0.35))
 	stats_lbl.text = t
 
 
