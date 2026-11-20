@@ -1,6 +1,6 @@
 extends Node3D
 ## Main menu: four buttons in a vertical list; pressing one draws a connector line to the entries it gives
-## access to (Multi Player -> Join / Host, ...). A tilted "Last loaded Ship" card sits bottom-right.
+## access to (Multi Player -> Join / Host, ...). The big spinning ship on the right is the last loaded ship.
 
 const MAIN := ["Multi Player", "Single Player", "Creation", "Other"]
 const TREE := {
@@ -220,44 +220,14 @@ func _build_ui() -> void:
 	big.size = Vector2(780, 560)
 	big.spin_speed = 0.25
 	root.add_child(big)
-	big.setup(Premades.lance() if Game.last_ship.get("name", "") != "Lance" else Premades.anvil())
+	big.setup(Game.last_ship_bp())
 	detail = Hud.ConsolePanel.new()
 	detail.position = Vector2(780, 150)
 	detail.size = Vector2(470, 440)
 	detail.visible = false
 	root.add_child(detail)
-	_build_last_card()
 	(main_btns[1] as Button).button_pressed = true
 	_open("Single Player")
-
-
-func _build_last_card() -> void:
-	var card := Hud.ConsolePanel.new()
-	card.title = "LAST LOADED SHIP"
-	card.size = Vector2(330, 190)
-	card.position = Vector2(1180, 640)
-	card.pivot_offset = card.size * 0.5
-	card.rotation = -0.5
-	root.add_child(card)
-	var bp := Game.last_ship_bp()
-	var pv := HullPreview.new()
-	pv.custom_minimum_size = Vector2(0, 110)
-	pv.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	card.body.add_child(pv)
-	pv.setup(bp)
-	var l := Label.new()
-	l.text = "%s  -  click to open in the editor" % bp["name"]
-	l.add_theme_font_size_override("font_size", 11)
-	card.body.add_child(l)
-	var open := Button.new()
-	open.flat = true
-	open.focus_mode = Control.FOCUS_NONE
-	open.set_anchors_preset(Control.PRESET_FULL_RECT)
-	open.mouse_filter = Control.MOUSE_FILTER_STOP
-	open.pressed.connect(func():
-		Game.editing_bp = bp.duplicate(true)
-		Game.goto_scene("res://scenes/ship_editor.tscn"))
-	card.add_child(open)
 
 
 func _clear_options() -> void:
