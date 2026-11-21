@@ -29,18 +29,35 @@ static func drive_toward(ship: Ship, dest: Vector3, speed: float, stop_dist := 0
 	return {"auto": true, "v_target": to.normalized() * v, "face": to.normalized(), "speed_limit": speed}
 
 
-static func orbit(ship: Ship, center: Vector3, radius: float, speed: float) -> Dictionary:
+static func orbit(ship: Ship, center: Vector3, radius: float, speed: float, dirn := 1.0, center_vel := Vector3.ZERO) -> Dictionary:
 	var rel := ship.global_position - center
 	var r := maxf(rel.length(), 0.01)
 	var radial := rel / r
 	var tangent := radial.cross(Vector3.UP)
 	if tangent.length() < 0.01:
 		tangent = radial.cross(Vector3.RIGHT)
-	tangent = tangent.normalized()
+	tangent = tangent.normalized() * dirn
 	var a := maxf(ship.max_accel() * 0.5, 0.5)
 	var sp := minf(speed, sqrt(a * radius))
-	var v := tangent * sp + radial * clampf((radius - r) * 0.6, -sp, sp)
+	var v := tangent * sp + radial * clampf((radius - r) * 0.6, -sp, sp) + center_vel
 	return {"auto": true, "v_target": v, "face": (-radial).normalized()}
+
+
+## Move to a point that may itself be moving (leader velocity `vel`), arriving at rest relative to it.
+static func follow(ship: Ship, dest: Vector3, vel: Vector3, speed: float) -> Dictionary:
+	var to := dest - ship.global_position
+	var dist := to.length()
+	if dist < 0.05:
+		return {"auto": true, "v_target": vel, "speed_limit": speed}
+	var a := accel_along(ship, -to) * 0.6
+	var v := minf(speed, sqrt(2.0 * a * dist))
+	return {"auto": true, "v_target": vel + to / dist * v, "speed_limit": speed}
+
+
+## Pass-through leg of a route: full speed toward the point, no braking.
+static func pass_through(ship: Ship, dest: Vector3, speed: float) -> Dictionary:
+	var to := dest - ship.global_position
+	return {"auto": true, "v_target": to.normalized() * speed, "face": to.normalized(), "speed_limit": speed}
 
 
 static func hold(ship: Ship) -> Dictionary:

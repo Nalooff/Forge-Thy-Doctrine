@@ -27,6 +27,9 @@ var _tutorial := false
 var waypoint := Vector3.ZERO
 var has_wp := false
 var viz: WaypointViz
+var tuner: OrderTuner
+var order_p := {}          # parameters of the active order
+var facing := {"mode": "auto"}   # facing while moving: auto (travel), lock (fixed direction), point
 var _wp_drag := 0          # 0 none, 1 dragging on the XZ plane, 2 dragging altitude
 
 
@@ -43,6 +46,9 @@ func _ready() -> void:
 	viz = WaypointViz.new()
 	viz.arena = self
 	add_child(viz)
+	tuner = OrderTuner.new()
+	tuner.arena = self
+	add_child(tuner)
 	hud = Hud.new()
 	add_child(hud)
 	hud.setup(self)
@@ -145,6 +151,10 @@ func _spawn_player(pos: Vector3, dir: Vector3) -> void:
 	order = "none"
 	has_wp = false
 	_wp_drag = 0
+	order_p = {}
+	facing = {"mode": "auto"}
+	if tuner != null:
+		tuner.abort()
 	rig.set_map_mode(false)
 	_apply_mouse_mode()
 
@@ -336,6 +346,7 @@ func set_waypoint(p: Vector3, go := true) -> void:
 	has_wp = true
 	if go:
 		order = "goto"
+		order_p = {"end_dir": Vector3.ZERO}
 
 
 func clear_waypoint() -> void:
@@ -437,17 +448,174 @@ func _map_input(event: InputEvent) -> bool:
 
 
 func set_order(kind: String) -> void:
-	order = kind
-	if kind == "goto" and not has_wp:
-		hud.say("No waypoint - press M, click the map (or G for the cursor point)", Color(1, 0.8, 0.3))
-		order = "none"
+	match kind:
+		"hold":
+			order_hold()
+		"brake", "none":
+			order = kind
+			order_p = {}
+			hud.say("Order: %s" % ("brake" if kind == "brake" else "manual control"), Color(0.7, 0.9, 1))
+		"goto":
+			if not has_wp:
+				hud.say("No point yet - use Drive to point (or press G over the cursor)", Color(1, 0.8, 0.3))
+				return
+			order = "goto"
+			order_p = {"end_dir": Vector3.ZERO}
+		"face":
+			tuner.begin("lookat")
+		"drive":
+			tuner.begin("chase")
+		"orbit":
+			tuner.begin("orbit")
+
+
+func order_hold() -> void:
+	order = "hold"
+	order_p = {"pos": player.global_position}
+	hud.say("Holding position", Color(0.7, 0.9, 1))
+
+
+func order_goto(pos: Vector3, end_dir := Vector3.ZERO) -> void:
+	waypoint = pos
+	has_wp = true
+	order = "goto"
+	order_p = {"end_dir": end_dir}
+	hud.say("Driving to the point", Color(1.0, 0.8, 0.3))
+
+
+func order_route(pts: Array, end_dir := Vector3.ZERO) -> void:
+	order = "route"
+	order_p = {"points": pts.duplicate(), "idx": 0, "end_dir": end_dir}
+	waypoint = pts[0]
+	has_wp = true
+	hud.say("Route: %d points" % pts.size(), Color(1.0, 0.8, 0.3))
+
+
+func order_orbit(t: Ship, c: Vector3, r: float, alt: float, dirn: float) -> void:
+	order = "orbit"
+	order_p = {"target": t, "center": c, "radius": r, "alt": alt, "dir": dirn}
+	hud.say("Orbiting at %s" % WaypointViz.fmt_dist(r), Color(1.0, 0.8, 0.3))
+
+
+func order_chase(t: Ship, dist: float) -> void:
+	order = "chase"
+	order_p = {"target": t, "dist": dist}
+	hud.say("Driving to the ship, keeping %s" % WaypointViz.fmt_dist(dist), Color(1.0, 0.8, 0.3))
+
+
+func order_follow(t: Ship, off: Vector3, head: Vector3) -> void:
+	order = "follow"
+	order_p = {"target": t, "offset": off, "head": head}
+	hud.say("Following with offset", Color(1.0, 0.8, 0.3))
+
+
+func order_lookat(t: Ship, pt: Vector3) -> void:
+	order = "lookat"
+	order_p = {"target": t, "point": pt}
+	hud.say("Facing the point", Color(1.0, 0.8, 0.3))
+
+
+func set_facing_lock(d: Vector3) -> void:
+	if d.length() < 0.001:
 		return
-	if kind in ["face", "drive", "orbit"] and (player.target == null or not is_instance_valid(player.target) or not player.target.alive):
-		lock_target()
-		if player.target == null:
-			hud.say("No target - nothing to %s" % kind, Color(1, 0.8, 0.3))
-			order = "none"
-	hud.say("Order: %s" % kind, Color(0.7, 0.9, 1))
+	facing = {"mode": "lock", "dir": d.normalized()}
+	hud.say("Facing locked while moving", Color(1.0, 0.95, 0.75))
+
+
+func lock_heading_now() -> void:
+	set_facing_lock(player.forward())
+
+
+func set_facing_point(t: Ship, pt: Vector3) -> void:
+	facing = {"mode": "point", "ship": t, "point": pt}
+	hud.say("Facing the point while moving", Color(1.0, 0.95, 0.75))
+
+
+func set_facing_auto() -> void:
+	facing = {"mode": "auto"}
+	hud.say("Facing: along the travel direction", Color(1.0, 0.95, 0.75))
+
+
+func facing_point() -> Vector3:
+	var t = facing.get("ship")
+	if t != null and is_instance_valid(t):
+		return t.global_position
+	return facing.get("point", Vector3.ZERO)
+
+
+func lookat_point(p: Dictionary) -> Vector3:
+	var t = p.get("target")
+	if t != null and is_instance_valid(t):
+		return t.global_position
+	return p.get("point", Vector3.ZERO)
+
+
+func orbit_center(p: Dictionary) -> Vector3:
+	var t = p.get("target")
+	var c: Vector3 = p["center"]
+	if t != null and is_instance_valid(t):
+		c = t.global_position
+	return c + Vector3(0, float(p["alt"]), 0)
+
+
+func has_order_viz() -> bool:
+	return order in ["goto", "route", "orbit", "chase", "follow", "lookat", "hold"] or facing["mode"] != "auto"
+
+
+func order_text() -> String:
+	match order:
+		"none":
+			return "manual control"
+		"brake":
+			return "brake"
+		"hold":
+			return "hold position"
+		"goto":
+			return "drive to point  (%s)" % WaypointViz.fmt_dist(wp_dist())
+		"route":
+			return "route  (point %d of %d)" % [int(order_p.get("idx", 0)) + 1, (order_p.get("points", []) as Array).size()]
+		"chase":
+			return "drive to ship, keep %s" % WaypointViz.fmt_dist(float(order_p.get("dist", 0.0)))
+		"orbit":
+			return "orbit, radius %s" % WaypointViz.fmt_dist(float(order_p.get("radius", 0.0)))
+		"follow":
+			return "follow with offset"
+		"lookat":
+			return "face a point"
+	return order
+
+
+func facing_text() -> String:
+	match facing["mode"]:
+		"lock":
+			var d: Vector3 = facing["dir"]
+			return "locked  HDG %03d  PIT %+d" % [int(fposmod(rad_to_deg(atan2(d.x, -d.z)), 360.0)), int(rad_to_deg(asin(clampf(d.y, -1, 1))))]
+		"point":
+			return "looking at a point"
+	return "auto (travel direction)"
+
+
+## The ship nearest to the cursor ray (used by the tuning modes to pick a target).
+func pick_ship(mp: Vector2) -> Ship:
+	var cam := rig.cam
+	var o := cam.project_ray_origin(mp)
+	var d := cam.project_ray_normal(mp)
+	var best: Ship = null
+	var bd := INF
+	for n in get_tree().get_nodes_in_group("ships"):
+		var s := n as Ship
+		if s == player or not s.alive:
+			continue
+		var rel := s.global_position - o
+		var t := rel.dot(d)
+		if t < 0.0:
+			continue
+		var perp := (rel - d * t).length()
+		var tol := maxf(float(s.stats["longest"]) * 0.7, 6.0 + t * 0.012)
+		if perp < tol and perp < bd:
+			bd = perp
+			best = s
+	return best
 
 
 func lock_target() -> void:
@@ -507,11 +675,16 @@ func leave() -> void:
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("pause"):
+		if tuner.active:
+			tuner.cancel()
+			return
 		set_paused(not paused)
 		return
 	if paused or player == null:
 		return
 	rig.unhandled(event)
+	if tuner.handle(event):
+		return
 	if rig.map_mode and _map_input(event):
 		return
 	if event is InputEventMouseMotion and rig.first_person and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
@@ -566,6 +739,99 @@ func _test_shot() -> void:
 	hud.log_msg("[color=gray]Test %s round fired at your hull[/color]" % test_shot_weapon)
 
 
+func _arrived_at(dest: Vector3) -> bool:
+	return player.global_position.distance_to(dest) < maxf(12.0, float(player.stats["longest"]) * 0.5) and player.linear_velocity.length() < 10.0
+
+
+func _finish_at(dest: Vector3, end_dir: Vector3, msg: String) -> void:
+	order = "hold"
+	order_p = {"pos": dest}
+	if end_dir.length() > 0.1:
+		order_p["face"] = end_dir
+	hud.say(msg, Color(0.5, 1.0, 0.6))
+
+
+## Turns the active movement order into a flight command for this frame.
+func _order_cmd() -> Dictionary:
+	var sl := hud.speed_limit
+	var cmd := Autopilot.hold(player)
+	match order:
+		"hold":
+			var hp: Vector3 = order_p.get("pos", player.global_position)
+			cmd = Autopilot.follow(player, hp, Vector3.ZERO, minf(sl, 80.0))
+			var hf: Vector3 = order_p.get("face", Vector3.ZERO)
+			if hf.length() > 0.1:
+				cmd["face"] = hf
+		"brake":
+			cmd = {"brake": true}
+		"goto":
+			if has_wp:
+				if _arrived_at(waypoint):
+					_finish_at(waypoint, order_p.get("end_dir", Vector3.ZERO), "Point reached")
+				else:
+					cmd = Autopilot.go_to(player, waypoint, sl)
+		"route":
+			var pts: Array = order_p["points"]
+			var idx := int(order_p["idx"])
+			var dest: Vector3 = pts[idx]
+			waypoint = dest
+			has_wp = true
+			if idx >= pts.size() - 1:
+				if _arrived_at(dest):
+					_finish_at(dest, order_p.get("end_dir", Vector3.ZERO), "Route finished")
+				else:
+					cmd = Autopilot.go_to(player, dest, sl)
+			else:
+				if player.global_position.distance_to(dest) < maxf(40.0, float(player.stats["longest"])):
+					order_p["idx"] = idx + 1
+				cmd = Autopilot.pass_through(player, dest, sl)
+		"chase":
+			var t = order_p.get("target")
+			if t != null and is_instance_valid(t) and t.alive:
+				var tp: Vector3 = t.global_position
+				var away: Vector3 = player.global_position - tp
+				if away.length() < 0.1:
+					away = Vector3.BACK
+				cmd = Autopilot.follow(player, tp + away.normalized() * float(order_p["dist"]), t.linear_velocity, sl)
+				cmd["face"] = (tp - player.global_position).normalized()
+			else:
+				order_hold()
+				hud.say("Target lost - holding", Color(1, 0.8, 0.3))
+		"follow":
+			var lt = order_p.get("target")
+			if lt != null and is_instance_valid(lt) and lt.alive:
+				var dst: Vector3 = lt.to_global(order_p["offset"])
+				cmd = Autopilot.follow(player, dst, lt.linear_velocity, sl)
+				var hl: Vector3 = order_p.get("head", Vector3.ZERO)
+				cmd["face"] = ((lt.global_transform.basis * hl).normalized() if hl.length() > 0.1 else lt.forward())
+			else:
+				order_hold()
+				hud.say("Leader lost - holding", Color(1, 0.8, 0.3))
+		"orbit":
+			var ot = order_p.get("target")
+			var tv := Vector3.ZERO
+			if ot != null and is_instance_valid(ot) and ot.alive:
+				order_p["center"] = ot.global_position
+				tv = ot.linear_velocity
+			cmd = Autopilot.orbit(player, orbit_center(order_p), float(order_p["radius"]), minf(sl, 80.0), float(order_p["dir"]), tv)
+		"lookat":
+			cmd = Autopilot.face(player, lookat_point(order_p))
+	return cmd
+
+
+## Facing-while-moving: overrides the travel-direction facing of an automatic order.
+func _apply_facing(cmd: Dictionary) -> void:
+	if not cmd.get("auto", false) or order == "lookat" or (order == "hold" and order_p.has("face")):
+		return
+	match facing["mode"]:
+		"lock":
+			cmd["face"] = facing["dir"]
+		"point":
+			var d := facing_point() - player.global_position
+			if d.length() > 0.1:
+				cmd["face"] = d.normalized()
+
+
 func _physics_process(delta: float) -> void:
 	_t += delta
 	for b in bots:
@@ -588,30 +854,17 @@ func _physics_process(delta: float) -> void:
 	var cmd := {}
 	var tgt := player.target
 	var has_tgt := tgt != null and is_instance_valid(tgt) and tgt.alive
-	if manual or order == "none":
+	var lp = tuner.look_point()
+	if manual or (order == "none" and lp == null):
 		cmd = {"move": mv, "rot": rot, "speed_limit": hud.speed_limit}
 		if manual:
 			order = "none"
+			order_p = {}
+	elif lp != null:
+		cmd = Autopilot.face(player, lp)
 	else:
-		match order:
-			"hold":
-				cmd = Autopilot.hold(player)
-			"brake":
-				cmd = {"brake": true}
-			"face":
-				cmd = Autopilot.face(player, tgt.global_position) if has_tgt else Autopilot.hold(player)
-			"drive":
-				cmd = Autopilot.drive_toward(player, tgt.global_position, hud.speed_limit, 150.0) if has_tgt else Autopilot.hold(player)
-			"goto":
-				cmd = Autopilot.hold(player)
-				if has_wp:
-					if wp_dist() < maxf(12.0, float(player.stats["longest"]) * 0.5) and player.linear_velocity.length() < 10.0:
-						order = "hold"
-						hud.say("Waypoint reached", Color(0.5, 1.0, 0.6))
-					else:
-						cmd = Autopilot.go_to(player, waypoint, hud.speed_limit)
-			"orbit":
-				cmd = Autopilot.orbit(player, tgt.global_position, 400.0, minf(hud.speed_limit, 80.0)) if has_tgt else Autopilot.hold(player)
+		cmd = _order_cmd()
+		_apply_facing(cmd)
 	if Input.is_action_pressed("brake"):
 		cmd["brake"] = true
 	cmd["fire"] = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and not rig.map_mode and not test_shot_on and not hud.is_mouse_over_ui() and (rig.first_person or free_cursor_on())

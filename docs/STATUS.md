@@ -21,6 +21,7 @@ Last audit: 2026-11-20, against `docs/Forge_Thy_Doctrine.md` and the code in `sc
 - Console HUD: panels 1-5 (3D ship model with Basic/Exploded/Onion tabs, module tabs, 3D radar, objectives/log), sub-panel 2
 - Game modes vs bots: Team Deathmatch, Team Elimination, Deathmatch (Freematch)
 - Bots/autopilot, projectiles (kinetic, laser, missile), premade ships (Dart, Lance, Anvil), JSON ship saves
+- Movement orders as tuning modes (sub panel hides, you shape the order in the 3D view): Drive to point (plane under the cursor, ship turns to look at it, Alt+mouse = height, click = go, click-drag = optional final heading), Drive to ship (distance circle), Orbit (ship or point, radius = mouse distance, R flips direction, Alt = height), Face, Follow offset (ghost ship + optional heading, kept in the leader's frame), Route (Shift+click chain), Hold position (returns to the exact spot); Facing while moving: Auto / Lock heading / Lock direction / Face point; Esc cancels
 - Movement waypoints: tactical map view (M) with range rings, click the XZ plane to place the point, drag it to slide, drag the diamond up/down for altitude (or the slider), G = go to the cursor point, waypoint label with distance/ETA and edge arrow, autopilot brakes with the real reverse thrust and stops on the point
 - Headless test suite (`tests/run_tests.gd`, 36 checks + editor UI test + waypoint test passing)
 
@@ -29,7 +30,7 @@ Last audit: 2026-11-20, against `docs/Forge_Thy_Doctrine.md` and the code in `sc
 - Editor Export saves the ship currently open (not a picker of several ships)
 - Hull tools: Bevel/fillet (ring "round") and Solidify (thickness) are partial
 - Top notification ticker: plain ticker, no comms/crew icons routing yet
-- Console sub-panels: Combat simplified; Movement has waypoints + tactical map but no formation/fleet orders and no "orbit a point" yet
+- Console sub-panels: Combat simplified; Movement orders are for the player's ship only (no fleet/formation commands for other ships yet)
 - Console modes listed but inert: Defense, Comms, Crew Cmd, Boarding, Hangar/Fleet, AI/Auto (each shows what it needs)
 - Menu stubs: Join, Host (info text only), Campaign, Module creation, Download creation
 - Interior and Cosmetics steps exist in the timeline: Interior is a placeholder, Cosmetics is colors only

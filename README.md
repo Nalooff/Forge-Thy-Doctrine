@@ -82,7 +82,18 @@ godot --headless --path . --script res://tests/arena_test.gd -- freematch 40
 `tests/shot.gd` renders a scene to a PNG (needs a display: `xvfb-run ... --rendering-driver opengl3`).
 
 ## Movement
-Orders: hold, brake, face/drive/orbit a locked target, **go to waypoint**. Press **M** (or Movement > Tactical map) for the tactical map: LMB sets the point on the XZ plane (hold and drag to slide it), drag the diamond up/down to change altitude, RMB orbit, MMB pan, wheel zoom. **G** sends the ship to the point under the cursor in any view. Manual thrust cancels the order; "Go to waypoint" resumes it.
+Assisted flight (X) turns the keys into a target speed (speed limiter); manual flight applies raw thrust. Z brakes.
+
+Orders live in the Movement panel. Most of them **hide the panel and let you shape the order in the 3D view**; a click confirms, **Esc** cancels, **Alt + mouse** (or PageUp/PageDown) changes the height, and click-dragging adds an optional final heading:
+- **Drive to point**: a plane appears at your altitude, your ship turns to look at the cursor point, click to go.
+- **Drive to ship**: click a ship, the mouse distance sets the distance to keep.
+- **Orbit**: click a ship (or empty space), the circle radius follows the mouse, **R** flips the direction.
+- **Face**: click a ship or point; the ship turns and keeps its speed.
+- **Follow offset**: click the leader, place a ghost of your ship where you want it (optionally a heading); formation is kept in the leader's frame.
+- **Route**: Shift+click adds points, a plain click ends the route.
+- **Hold position** (returns to the exact spot), **Brake**, **Manual control**.
+- **Facing while moving**: Auto (travel direction), Lock heading, Lock direction, Face point.
+M opens the tactical map (long range picking), G drives to the point under the cursor.
 
 ## Look and fonts
 `scripts/ui/ui_style.gd` holds the shared theme (black iron, ember orange, dark red borders) and fonts: Cinzel for titles/buttons, Barlow Condensed for text (SIL OFL 1.1, licenses in `assets/fonts/`).

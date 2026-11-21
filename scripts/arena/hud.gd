@@ -32,8 +32,7 @@ var mode := "Movement"
 var sub_open := false
 var radar_zoom := 1200.0
 var speed_limit := 150.0
-var alt_slider: HSlider
-var alt_val: Label
+var _sub_was_open := false
 var root: Control
 var overlay: Control
 var radar: Control
@@ -420,6 +419,10 @@ class Overlay extends Control:
 		_draw_waypoint(cam)
 		if hud.arena.rig.map_mode:
 			_draw_map(cam)
+		var tn: OrderTuner = hud.arena.tuner
+		if tn.active:
+			Hud.outlined(self, tn.banner, Vector2(20, 96), 13, Color(1.0, 0.8, 0.3), size.x - 40.0, HORIZONTAL_ALIGNMENT_CENTER)
+			Hud.outlined(self, tn.status_line(), Vector2(20, 118), 12, Color(1.0, 0.95, 0.75), size.x - 40.0, HORIZONTAL_ALIGNMENT_CENTER)
 
 	static func fmt_dist(m: float) -> String:
 		return "%d m" % int(m) if m < 1000.0 else "%.1f km" % (m / 1000.0)
@@ -470,7 +473,8 @@ class Overlay extends Control:
 		var pp := Vector2(-hd.y, hd.x)
 		draw_colored_polygon(PackedVector2Array([psp + hd * 13.0, psp - hd * 9.0 + pp * 8.0, psp - hd * 4.0, psp - hd * 9.0 - pp * 8.0]), Color(0.5, 0.8, 1.0))
 		Hud.outlined(self, "YOU", psp + Vector2(14, 14), 11, Color(0.5, 0.8, 1.0))
-		Hud.outlined(self, "TACTICAL MAP   LMB set point (drag to slide it)   drag the diamond up/down: altitude   RMB orbit   MMB pan   wheel zoom   M exit", Vector2(20, 96), 13, Color(1.0, 0.8, 0.3), size.x - 40.0, HORIZONTAL_ALIGNMENT_CENTER)
+		if not hud.arena.tuner.active:
+			Hud.outlined(self, "TACTICAL MAP   LMB set point (drag to slide it)   drag the diamond up/down: altitude   RMB orbit   MMB pan   wheel zoom   M exit", Vector2(20, 96), 13, Color(1.0, 0.8, 0.3), size.x - 40.0, HORIZONTAL_ALIGNMENT_CENTER)
 
 
 class Radar3D extends Control:
@@ -791,7 +795,7 @@ func setup(a) -> void:
 	root.add_child(overlay)
 
 	# Sub Panel 2 first, so it sits behind the other panels (as in the mock-up)
-	sub_panel = _rect_panel("SUB", 411, 215, 756, 530)
+	sub_panel = _rect_panel("SUB", 411, 150, 756, 530)
 	sub_body = sub_panel.body
 	sub_panel.visible = false
 
@@ -1101,11 +1105,11 @@ func _refresh_mode_label() -> void:
 		lbl_mode.text = "Mode: %s%s - click again to %s" % [mode, "" if sub_open else " (closed)", "close" if sub_open else "open"]
 
 
-func _make_sub_text() -> void:
+func _make_sub_text(min_h := 120) -> void:
 	sub_text = RichTextLabel.new()
 	sub_text.bbcode_enabled = true
 	sub_text.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	sub_text.custom_minimum_size = Vector2(0, 120)
+	sub_text.custom_minimum_size = Vector2(0, min_h)
 	sub_text.add_theme_font_size_override("normal_font_size", 11)
 	sub_text.add_theme_font_size_override("bold_font_size", 11)
 	sub_body.add_child(sub_text)
@@ -1119,15 +1123,25 @@ func _sub_movement() -> void:
 	ck.add_theme_font_size_override("font_size", 10)
 	ck.toggled.connect(func(on: bool): arena.set_assist(on))
 	sub_body.add_child(ck)
+	_label("Orders (most hide this panel and let you set them in the 3D view)", sub_body, 9)
 	var g := GridContainer.new()
 	g.columns = 3
 	g.add_theme_constant_override("h_separation", 3)
 	g.add_theme_constant_override("v_separation", 3)
 	sub_body.add_child(g)
-	for pair in [["Hold position", "hold"], ["Brake (Z)", "brake"], ["Face target", "face"], ["Drive toward", "drive"], ["Orbit target", "orbit"], ["Manual control", "none"]]:
+	for pair in [["Hold position", "hold"], ["Brake (Z)", "brake"], ["Manual control", "none"],
+			["Drive to point", "point"], ["Drive to ship", "chase"], ["Orbit", "orbit"],
+			["Face", "lookat"], ["Follow offset", "follow"], ["Route", "route"]]:
 		var k: String = pair[1]
-		var b := _button(pair[0], g, func(): arena.set_order(k), 10)
-		b.custom_minimum_size = Vector2(120, 24)
+		var b := _button(pair[0], g, func(): _movement_button(k), 10)
+		b.custom_minimum_size = Vector2(120, 22)
+	_label("Facing while moving", sub_body, 9)
+	var fr := HBoxContainer.new()
+	sub_body.add_child(fr)
+	_button("Auto (travel)", fr, func(): arena.set_facing_auto(), 10)
+	_button("Lock heading", fr, func(): arena.lock_heading_now(), 10)
+	_button("Lock direction", fr, func(): arena.tuner.begin("lockdir"), 10)
+	_button("Face point", fr, func(): arena.tuner.begin("facepoint"), 10)
 	var r2 := HBoxContainer.new()
 	sub_body.add_child(r2)
 	_label("Speed limiter", r2, 10)
@@ -1144,27 +1158,34 @@ func _sub_movement() -> void:
 	_label("View", vr, 10)
 	_button("Standard (V)", vr, func(): arena.set_map_mode(false), 10)
 	_button("Tactical map (M)", vr, func(): arena.set_map_mode(true), 10)
-	_button("Center map on ship", vr, func(): arena.rig.map_follow = true, 10)
-	var wr := HBoxContainer.new()
-	sub_body.add_child(wr)
-	_label("Waypoint", wr, 10)
-	_button("Go to waypoint", wr, func(): arena.set_order("goto"), 10)
-	_button("Go to cursor (G)", wr, func(): arena._go_to_cursor(), 10)
-	_button("Clear", wr, func(): arena.clear_waypoint(), 10)
-	var ar2 := HBoxContainer.new()
-	sub_body.add_child(ar2)
-	_label("Waypoint altitude", ar2, 10)
-	alt_val = _label("-", ar2, 10)
-	alt_slider = HSlider.new()
-	alt_slider.min_value = -3000
-	alt_slider.max_value = 3000
-	alt_slider.step = 5
-	alt_slider.custom_minimum_size = Vector2(200, 16)
-	alt_slider.value_changed.connect(func(v: float):
-		if arena.has_wp:
-			arena.waypoint.y = v)
-	ar2.add_child(alt_slider)
-	_make_sub_text()
+	_button("Center map", vr, func(): arena.rig.map_follow = true, 10)
+	_button("Go to cursor (G)", vr, func(): arena._go_to_cursor(), 10)
+	_make_sub_text(48)
+
+
+func _movement_button(k: String) -> void:
+	match k:
+		"hold", "brake", "none":
+			arena.set_order(k)
+		_:
+			arena.tuner.begin(k)
+
+
+func hide_sub() -> void:
+	_sub_was_open = sub_open
+	sub_open = false
+	if sub_panel != null:
+		sub_panel.visible = false
+	_refresh_mode_label()
+
+
+func restore_sub() -> void:
+	if _sub_was_open and sub_panel != null:
+		sub_open = true
+		sub_panel.visible = true
+		sub_panel.queue_redraw()
+		_refresh_sub()
+	_sub_was_open = false
 
 
 func _sub_combat() -> void:
@@ -1207,20 +1228,14 @@ func _refresh_sub() -> void:
 	var t := ""
 	match mode:
 		"Movement", "Tactical Map":
+			t += "Order: [color=#ffe680]%s[/color]\n" % arena.order_text()
+			t += "Facing: [color=#ffe680]%s[/color]\n" % arena.facing_text()
 			var vl := ship.global_transform.basis.inverse() * ship.linear_velocity
 			t += "Velocity (local)  right %.1f   up %.1f   fwd %.1f  m/s\n" % [vl.x, vl.y, -vl.z]
 			t += "Speed %.1f m/s    Angular %.2f rad/s\n" % [ship.linear_velocity.length(), ship.angular_velocity.length()]
 			t += "Thrust  fwd %.0f  back %.0f  right %.0f  left %.0f  up %.0f  down %.0f kN\n" % [ship.caps[0], ship.caps[1], ship.caps[2], ship.caps[3], ship.caps[4], ship.caps[5]]
 			t += "RCS %.0f kN (10%% of best vector)   Mass %.0f t\n" % [ship.rcs_cap, ship.mass]
-			t += "Order: [color=#ffe680]%s[/color]" % arena.order
-			if arena.has_wp:
-				t += "\nWaypoint  X %.0f  Y %.0f  Z %.0f   distance %s" % [arena.waypoint.x, arena.waypoint.y, arena.waypoint.z, Overlay.fmt_dist(arena.wp_dist())]
-			else:
-				t += "\nNo waypoint: press M and click the map, or G to go to the cursor point."
-			if alt_slider != null and is_instance_valid(alt_slider):
-				alt_slider.editable = arena.has_wp
-				alt_slider.set_value_no_signal(arena.waypoint.y if arena.has_wp else 0.0)
-				alt_val.text = "%d m" % int(arena.waypoint.y) if arena.has_wp else "-"
+
 		"Combat":
 			for m in ship.mods_of("barrel"):
 				var ws: Dictionary = m["ws"]
