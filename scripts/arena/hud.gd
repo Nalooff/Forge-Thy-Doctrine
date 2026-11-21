@@ -32,6 +32,8 @@ var mode := "Movement"
 var sub_open := false
 var radar_zoom := 1200.0
 var speed_limit := 150.0
+var alt_slider: HSlider
+var alt_val: Label
 var root: Control
 var overlay: Control
 var radar: Control
@@ -415,6 +417,60 @@ class Overlay extends Control:
 			draw_polyline(PackedVector2Array([p + Vector2(0, -r), p + Vector2(r, 0), p + Vector2(0, r), p + Vector2(-r, 0), p + Vector2(0, -r)]), col2, 2.0 if locked else 1.0)
 			var d := hud.ship.global_position.distance_to(wp)
 			Hud.outlined(self, "%s %s  %dm" % ["LOCK" if locked else "", o.name, int(d)], p + Vector2(r + 4, 4), 12, col2)
+		_draw_waypoint(cam)
+		if hud.arena.rig.map_mode:
+			_draw_map(cam)
+
+	static func fmt_dist(m: float) -> String:
+		return "%d m" % int(m) if m < 1000.0 else "%.1f km" % (m / 1000.0)
+
+	func _draw_waypoint(cam: Camera3D) -> void:
+		var ar = hud.arena
+		if not ar.has_wp:
+			return
+		var w: Vector3 = ar.waypoint
+		var col := Color(1.0, 0.78, 0.25)
+		var dist: float = ar.wp_dist()
+		var spd := hud.ship.linear_velocity.length()
+		var rate := maxf(spd, 1.0) if ar.order == "goto" else 0.0
+		var eta := "ETA %ds" % int(dist / rate) if rate > 5.0 else ""
+		var txt := "WAYPOINT  %s  alt %+d m  %s" % [fmt_dist(dist), int(w.y - hud.ship.global_position.y), eta]
+		var on_screen := not cam.is_position_behind(w)
+		var p := cam.unproject_position(w) if on_screen else Vector2.ZERO
+		if on_screen and Rect2(Vector2(30, 30), size - Vector2(60, 60)).has_point(p):
+			Hud.outlined(self, txt, p + Vector2(18, -10), 13, col)
+		else:
+			# off screen: arrow on the edge pointing to it
+			var local := cam.global_transform.affine_inverse() * w
+			var dir := Vector2(local.x, -local.y)
+			if local.z > 0.0:
+				dir = -dir
+			if dir.length() < 0.001:
+				dir = Vector2(0, -1)
+			dir = dir.normalized()
+			var c := size * 0.5
+			var k := minf((size.x * 0.5 - 50.0) / maxf(absf(dir.x), 0.001), (size.y * 0.5 - 50.0) / maxf(absf(dir.y), 0.001))
+			var ep := c + dir * k
+			var perp := Vector2(-dir.y, dir.x)
+			draw_colored_polygon(PackedVector2Array([ep + dir * 14.0, ep - dir * 8.0 + perp * 10.0, ep - dir * 8.0 - perp * 10.0]), col)
+			Hud.outlined(self, "WAYPOINT  %s" % fmt_dist(dist), ep - dir * 22.0 + Vector2(-60 if dir.x > 0.0 else 12, 4), 12, col)
+
+	func _draw_map(cam: Camera3D) -> void:
+		var viz: WaypointViz = hud.arena.viz
+		var sp: Vector3 = hud.ship.global_position
+		for i in range(1, viz.ring_count + 1, 1):
+			var wp := Vector3(sp.x + viz.ring_step * i, viz.plane_y, sp.z)
+			if not cam.is_position_behind(wp):
+				var p := cam.unproject_position(wp)
+				if Rect2(Vector2.ZERO, size).has_point(p):
+					Hud.outlined(self, fmt_dist(viz.ring_step * i), p + Vector2(3, -3), 11, Color(0.85, 0.35, 0.2, 0.9))
+		var psp := cam.unproject_position(sp)
+		var pf := cam.unproject_position(sp - hud.ship.global_transform.basis.z * viz.ring_step * 0.25)
+		var hd := (pf - psp).normalized() if pf.distance_to(psp) > 1.0 else Vector2(0, -1)
+		var pp := Vector2(-hd.y, hd.x)
+		draw_colored_polygon(PackedVector2Array([psp + hd * 13.0, psp - hd * 9.0 + pp * 8.0, psp - hd * 4.0, psp - hd * 9.0 - pp * 8.0]), Color(0.5, 0.8, 1.0))
+		Hud.outlined(self, "YOU", psp + Vector2(14, 14), 11, Color(0.5, 0.8, 1.0))
+		Hud.outlined(self, "TACTICAL MAP   LMB set point (drag to slide it)   drag the diamond up/down: altitude   RMB orbit   MMB pan   wheel zoom   M exit", Vector2(20, 96), 13, Color(1.0, 0.8, 0.3), size.x - 40.0, HORIZONTAL_ALIGNMENT_CENTER)
 
 
 class Radar3D extends Control:
@@ -735,7 +791,7 @@ func setup(a) -> void:
 	root.add_child(overlay)
 
 	# Sub Panel 2 first, so it sits behind the other panels (as in the mock-up)
-	sub_panel = _rect_panel("SUB", 411, 290, 756, 530)
+	sub_panel = _rect_panel("SUB", 411, 215, 756, 530)
 	sub_body = sub_panel.body
 	sub_panel.visible = false
 
@@ -869,7 +925,7 @@ func setup(a) -> void:
 	help.offset_top = 34.0
 	help.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	help.add_theme_font_size_override("font_size", 10)
-	help.text = "W/S A/D Space/C thrust | Q/E roll | arrows or mouse (FP) pitch-yaw | LMB fire | RMB-drag orbit, wheel zoom\nV view | Tab free cursor | T lock | X assist | Z brake | Esc pause"
+	help.text = "W/S A/D Space/C thrust | Q/E roll | arrows or mouse (FP) pitch-yaw | LMB fire | RMB-drag orbit, wheel zoom\nV view | M tactical map | G go to cursor | Tab free cursor | T lock | X assist | Z brake | Esc pause"
 	help.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(help)
 	flash_rect = ColorRect.new()
@@ -1014,6 +1070,8 @@ func set_mode(m: String) -> void:
 		_refresh_mode_label()
 		return
 	mode = m
+	if m == "Tactical Map" and arena != null and not arena.rig.map_mode:
+		arena.set_map_mode(true)
 	sub_open = true
 	sub_panel.visible = true
 	sub_panel.title = m.to_upper()
@@ -1081,6 +1139,31 @@ func _sub_movement() -> void:
 	sl.custom_minimum_size = Vector2(240, 16)
 	sl.value_changed.connect(func(v: float): speed_limit = v; val.text = "%d m/s" % int(v))
 	r2.add_child(sl)
+	var vr := HBoxContainer.new()
+	sub_body.add_child(vr)
+	_label("View", vr, 10)
+	_button("Standard (V)", vr, func(): arena.set_map_mode(false), 10)
+	_button("Tactical map (M)", vr, func(): arena.set_map_mode(true), 10)
+	_button("Center map on ship", vr, func(): arena.rig.map_follow = true, 10)
+	var wr := HBoxContainer.new()
+	sub_body.add_child(wr)
+	_label("Waypoint", wr, 10)
+	_button("Go to waypoint", wr, func(): arena.set_order("goto"), 10)
+	_button("Go to cursor (G)", wr, func(): arena._go_to_cursor(), 10)
+	_button("Clear", wr, func(): arena.clear_waypoint(), 10)
+	var ar2 := HBoxContainer.new()
+	sub_body.add_child(ar2)
+	_label("Waypoint altitude", ar2, 10)
+	alt_val = _label("-", ar2, 10)
+	alt_slider = HSlider.new()
+	alt_slider.min_value = -3000
+	alt_slider.max_value = 3000
+	alt_slider.step = 5
+	alt_slider.custom_minimum_size = Vector2(200, 16)
+	alt_slider.value_changed.connect(func(v: float):
+		if arena.has_wp:
+			arena.waypoint.y = v)
+	ar2.add_child(alt_slider)
 	_make_sub_text()
 
 
@@ -1130,6 +1213,14 @@ func _refresh_sub() -> void:
 			t += "Thrust  fwd %.0f  back %.0f  right %.0f  left %.0f  up %.0f  down %.0f kN\n" % [ship.caps[0], ship.caps[1], ship.caps[2], ship.caps[3], ship.caps[4], ship.caps[5]]
 			t += "RCS %.0f kN (10%% of best vector)   Mass %.0f t\n" % [ship.rcs_cap, ship.mass]
 			t += "Order: [color=#ffe680]%s[/color]" % arena.order
+			if arena.has_wp:
+				t += "\nWaypoint  X %.0f  Y %.0f  Z %.0f   distance %s" % [arena.waypoint.x, arena.waypoint.y, arena.waypoint.z, Overlay.fmt_dist(arena.wp_dist())]
+			else:
+				t += "\nNo waypoint: press M and click the map, or G to go to the cursor point."
+			if alt_slider != null and is_instance_valid(alt_slider):
+				alt_slider.editable = arena.has_wp
+				alt_slider.set_value_no_signal(arena.waypoint.y if arena.has_wp else 0.0)
+				alt_val.text = "%d m" % int(arena.waypoint.y) if arena.has_wp else "-"
 		"Combat":
 			for m in ship.mods_of("barrel"):
 				var ws: Dictionary = m["ws"]

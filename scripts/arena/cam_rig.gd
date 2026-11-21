@@ -10,6 +10,13 @@ var pitch := -0.35
 var dist := 40.0
 var shake_t := 0.0
 var shake_amp := 0.0
+# tactical map view (GDD 4.3 view 2): high camera over the XZ plane, free pan / orbit / zoom
+var map_mode := false
+var map_follow := true
+var map_focus := Vector3.ZERO
+var map_dist := 2500.0
+var map_yaw := 0.0
+var map_pitch := -1.1
 
 
 func _ready() -> void:
@@ -26,6 +33,16 @@ func follow(s: Ship) -> void:
 	dist = clampf(float(s.stats["longest"]) * 2.4, 12.0, 20000.0)
 
 
+func set_map_mode(on: bool) -> void:
+	map_mode = on
+	if on:
+		first_person = false
+		map_follow = true
+		if ship != null and is_instance_valid(ship):
+			map_focus = ship.global_position
+			map_dist = maxf(map_dist, float(ship.stats["longest"]) * 8.0)
+
+
 func shake(amount: float) -> void:
 	shake_amp = amount
 	shake_t = 0.45
@@ -33,6 +50,23 @@ func shake(amount: float) -> void:
 
 func unhandled(event: InputEvent) -> void:
 	if first_person:
+		return
+	if map_mode:
+		if event is InputEventMouseMotion:
+			if Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
+				map_yaw -= event.relative.x * 0.005
+				map_pitch = clampf(map_pitch - event.relative.y * 0.005, -1.55, -0.12)
+			elif Input.is_mouse_button_pressed(MOUSE_BUTTON_MIDDLE):
+				map_follow = false
+				var b := cam.global_transform.basis
+				var right := Vector3(b.x.x, 0.0, b.x.z).normalized()
+				var fwd := Vector3(-b.z.x, 0.0, -b.z.z).normalized()
+				map_focus += (-right * event.relative.x + fwd * event.relative.y) * map_dist * 0.0016
+		elif event is InputEventMouseButton and event.pressed:
+			if event.button_index == MOUSE_BUTTON_WHEEL_UP:
+				map_dist = maxf(map_dist * 0.88, 60.0)
+			elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+				map_dist = minf(map_dist * 1.14, 30000.0)
 		return
 	if event is InputEventMouseMotion and Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
 		yaw -= event.relative.x * 0.005
@@ -68,7 +102,12 @@ func _process(delta: float) -> void:
 			var up := Vector3.UP if absf(d.y) < 0.98 else Vector3.RIGHT
 			global_transform = Transform3D(t_basis * Basis.looking_at(d, up), ship.to_global(v["pos"]))
 			cam.position = Vector3.ZERO
-	if not first_person:
+	if map_mode and not first_person:
+		var c := ship.global_position if map_follow else map_focus
+		var moff := Vector3(0, 0, map_dist).rotated(Vector3.RIGHT, map_pitch).rotated(Vector3.UP, map_yaw)
+		global_transform = Transform3D(Basis.looking_at(-moff, Vector3.UP), c + moff)
+		cam.position = Vector3.ZERO
+	elif not first_person:
 		var center := ship.to_global(ship.stats["com"] as Vector3)
 		var off := Vector3(0, 0, dist).rotated(Vector3.RIGHT, pitch).rotated(Vector3.UP, yaw)
 		global_transform = Transform3D(Basis.looking_at(-off, Vector3.UP), center + off)

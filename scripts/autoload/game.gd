@@ -50,6 +50,8 @@ func _setup_input() -> void:
 	_key("toggle_view", [KEY_V])
 	_key("free_cursor", [KEY_TAB])
 	_key("lock_target", [KEY_T])
+	_key("tactical_map", [KEY_M])
+	_key("go_cursor", [KEY_G])
 	_key("pause", [KEY_ESCAPE])
 
 

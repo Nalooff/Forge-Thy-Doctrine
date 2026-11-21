@@ -24,6 +24,10 @@ var _last_shake := -1000.0
 var _t := 0.0
 var _dummy: Ship
 var _tutorial := false
+var waypoint := Vector3.ZERO
+var has_wp := false
+var viz: WaypointViz
+var _wp_drag := 0          # 0 none, 1 dragging on the XZ plane, 2 dragging altitude
 
 
 func _ready() -> void:
@@ -36,6 +40,9 @@ func _ready() -> void:
 	_build_world()
 	rig = CamRig.new()
 	add_child(rig)
+	viz = WaypointViz.new()
+	viz.arena = self
+	add_child(viz)
 	hud = Hud.new()
 	add_child(hud)
 	hud.setup(self)
@@ -136,6 +143,9 @@ func _spawn_player(pos: Vector3, dir: Vector3) -> void:
 	rig.first_person = false
 	hud.bind_ship(player)
 	order = "none"
+	has_wp = false
+	_wp_drag = 0
+	rig.set_map_mode(false)
 	_apply_mouse_mode()
 
 
@@ -321,8 +331,117 @@ func set_assist(on: bool) -> void:
 		player.assist = on
 
 
+func set_waypoint(p: Vector3, go := true) -> void:
+	waypoint = p
+	has_wp = true
+	if go:
+		order = "goto"
+
+
+func clear_waypoint() -> void:
+	has_wp = false
+	_wp_drag = 0
+	if order == "goto":
+		order = "hold"
+	hud.say("Waypoint cleared", Color(0.7, 0.9, 1))
+
+
+func set_map_mode(on: bool) -> void:
+	if player == null or not player.alive:
+		return
+	rig.set_map_mode(on)
+	_wp_drag = 0
+	_apply_mouse_mode()
+	hud.say("Tactical map" if on else "Standard view", Color(1.0, 0.75, 0.3))
+
+
+func wp_dist() -> float:
+	return player.global_position.distance_to(waypoint) if has_wp and player != null else 0.0
+
+
+func _plane_hit(mp: Vector2, y: float) -> Variant:
+	var o := rig.cam.project_ray_origin(mp)
+	var d := rig.cam.project_ray_normal(mp)
+	if absf(d.y) < 0.02:
+		return null
+	var t := (y - o.y) / d.y
+	if t < 0.0 or t > 80000.0:
+		return null
+	return o + d * t
+
+
+func _go_to_cursor() -> void:
+	if player == null or not player.alive:
+		return
+	var ar := _aim_ray()
+	var o: Vector3 = ar["o"]
+	var d: Vector3 = ar["d"]
+	var p: Vector3
+	if rig.map_mode:
+		var h = _plane_hit(get_viewport().get_mouse_position(), waypoint.y if has_wp else player.global_position.y)
+		if h == null:
+			return
+		p = h
+	else:
+		var hit := Projectile.trace(get_tree(), get_world_3d(), o, o + d * 20000.0, player)
+		p = (hit["pos"] as Vector3) if not hit.is_empty() else o + d * 1500.0
+	set_waypoint(p)
+	hud.say("Going to the cursor point", Color(1.0, 0.8, 0.3))
+
+
+func _drag_altitude(event: InputEventMouseMotion) -> void:
+	var cam := rig.cam
+	var o := cam.project_ray_origin(event.position)
+	var d := cam.project_ray_normal(event.position)
+	var n := cam.global_position - waypoint
+	n.y = 0.0
+	if n.length() < 0.001:
+		n = -cam.global_transform.basis.z
+		n.y = 0.0
+	n = n.normalized()
+	var den := n.dot(d)
+	if absf(den) > 0.08:
+		var t := n.dot(waypoint - o) / den
+		if t > 0.0:
+			waypoint.y = clampf((o + d * t).y, -20000.0, 20000.0)
+			return
+	waypoint.y = clampf(waypoint.y - event.relative.y * float(rig.map_dist) * 0.002, -20000.0, 20000.0)
+
+
+func _map_input(event: InputEvent) -> bool:
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		if event.pressed:
+			if hud.is_mouse_over_ui():
+				return false
+			var mp: Vector2 = event.position
+			if has_wp and not rig.cam.is_position_behind(waypoint) and rig.cam.unproject_position(waypoint).distance_to(mp) < 26.0:
+				_wp_drag = 2
+				return true
+			var h = _plane_hit(mp, waypoint.y if has_wp else player.global_position.y)
+			if h != null:
+				set_waypoint(h)
+				_wp_drag = 1
+			return true
+		elif _wp_drag != 0:
+			_wp_drag = 0
+			return true
+	elif event is InputEventMouseMotion and _wp_drag != 0:
+		if _wp_drag == 2:
+			_drag_altitude(event)
+		else:
+			var h2 = _plane_hit(event.position, waypoint.y)
+			if h2 != null:
+				waypoint = h2
+		return true
+	return false
+
+
 func set_order(kind: String) -> void:
 	order = kind
+	if kind == "goto" and not has_wp:
+		hud.say("No waypoint - press M, click the map (or G for the cursor point)", Color(1, 0.8, 0.3))
+		order = "none"
+		return
 	if kind in ["face", "drive", "orbit"] and (player.target == null or not is_instance_valid(player.target) or not player.target.alive):
 		lock_target()
 		if player.target == null:
@@ -393,6 +512,8 @@ func _unhandled_input(event: InputEvent) -> void:
 	if paused or player == null:
 		return
 	rig.unhandled(event)
+	if rig.map_mode and _map_input(event):
+		return
 	if event is InputEventMouseMotion and rig.first_person and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		_mouse += event.relative
 	if event.is_action_pressed("toggle_view"):
@@ -407,7 +528,11 @@ func _unhandled_input(event: InputEvent) -> void:
 		hud.say("Flight: %s" % ("ASSISTED" if player.assist else "MANUAL"), Color(0.7, 0.9, 1))
 	elif event.is_action_pressed("lock_target"):
 		lock_target()
-	elif event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT and test_shot_on and not hud.is_mouse_over_ui():
+	elif event.is_action_pressed("tactical_map"):
+		set_map_mode(not rig.map_mode)
+	elif event.is_action_pressed("go_cursor"):
+		_go_to_cursor()
+	elif event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT and test_shot_on and not rig.map_mode and not hud.is_mouse_over_ui():
 		_test_shot()
 
 
@@ -477,11 +602,19 @@ func _physics_process(delta: float) -> void:
 				cmd = Autopilot.face(player, tgt.global_position) if has_tgt else Autopilot.hold(player)
 			"drive":
 				cmd = Autopilot.drive_toward(player, tgt.global_position, hud.speed_limit, 150.0) if has_tgt else Autopilot.hold(player)
+			"goto":
+				cmd = Autopilot.hold(player)
+				if has_wp:
+					if wp_dist() < maxf(12.0, float(player.stats["longest"]) * 0.5) and player.linear_velocity.length() < 10.0:
+						order = "hold"
+						hud.say("Waypoint reached", Color(0.5, 1.0, 0.6))
+					else:
+						cmd = Autopilot.go_to(player, waypoint, hud.speed_limit)
 			"orbit":
 				cmd = Autopilot.orbit(player, tgt.global_position, 400.0, minf(hud.speed_limit, 80.0)) if has_tgt else Autopilot.hold(player)
 	if Input.is_action_pressed("brake"):
 		cmd["brake"] = true
-	cmd["fire"] = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and not test_shot_on and not hud.is_mouse_over_ui() and (rig.first_person or free_cursor_on())
+	cmd["fire"] = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and not rig.map_mode and not test_shot_on and not hud.is_mouse_over_ui() and (rig.first_person or free_cursor_on())
 	var ar := _aim_ray()
 	var o: Vector3 = ar["o"]
 	var d: Vector3 = ar["d"]

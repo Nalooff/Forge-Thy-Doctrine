@@ -81,6 +81,9 @@ godot --headless --path . --script res://tests/arena_test.gd -- freematch 40
 ```
 `tests/shot.gd` renders a scene to a PNG (needs a display: `xvfb-run ... --rendering-driver opengl3`).
 
+## Movement
+Orders: hold, brake, face/drive/orbit a locked target, **go to waypoint**. Press **M** (or Movement > Tactical map) for the tactical map: LMB sets the point on the XZ plane (hold and drag to slide it), drag the diamond up/down to change altitude, RMB orbit, MMB pan, wheel zoom. **G** sends the ship to the point under the cursor in any view. Manual thrust cancels the order; "Go to waypoint" resumes it.
+
 ## Look and fonts
 `scripts/ui/ui_style.gd` holds the shared theme (black iron, ember orange, dark red borders) and fonts: Cinzel for titles/buttons, Barlow Condensed for text (SIL OFL 1.1, licenses in `assets/fonts/`).
 
