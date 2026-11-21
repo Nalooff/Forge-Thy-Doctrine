@@ -29,18 +29,21 @@ static func drive_toward(ship: Ship, dest: Vector3, speed: float, stop_dist := 0
 	return {"auto": true, "v_target": to.normalized() * v, "face": to.normalized(), "speed_limit": speed}
 
 
-static func orbit(ship: Ship, center: Vector3, radius: float, speed: float, dirn := 1.0, center_vel := Vector3.ZERO) -> Dictionary:
+static func orbit(ship: Ship, center: Vector3, radius: float, speed: float, dirn := 1.0, center_vel := Vector3.ZERO, normal := Vector3.UP) -> Dictionary:
+	var nrm := normal.normalized()
 	var rel := ship.global_position - center
-	var r := maxf(rel.length(), 0.01)
-	var radial := rel / r
-	var tangent := radial.cross(Vector3.UP)
-	if tangent.length() < 0.01:
-		tangent = radial.cross(Vector3.RIGHT)
-	tangent = tangent.normalized() * dirn
+	var out := rel.dot(nrm)
+	var rp := rel - nrm * out
+	var r := rp.length()
+	if r < 0.5:
+		rp = nrm.cross(Vector3.RIGHT if absf(nrm.dot(Vector3.RIGHT)) < 0.9 else Vector3.FORWARD)
+		r = maxf(rp.length(), 0.01)
+	var radial := rp / r
+	var tangent := radial.cross(nrm).normalized() * dirn
 	var a := maxf(ship.max_accel() * 0.5, 0.5)
 	var sp := minf(speed, sqrt(a * radius))
-	var v := tangent * sp + radial * clampf((radius - r) * 0.6, -sp, sp) + center_vel
-	return {"auto": true, "v_target": v, "face": (-radial).normalized()}
+	var v := tangent * sp + radial * clampf((radius - r) * 0.6, -sp, sp) - nrm * clampf(out * 0.6, -sp, sp) + center_vel
+	return {"auto": true, "v_target": v, "face": (-rel).normalized()}
 
 
 ## Move to a point that may itself be moving (leader velocity `vel`), arriving at rest relative to it.

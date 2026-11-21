@@ -53,11 +53,21 @@ static func s_line(m: ImmediateMesh, a: Vector3, b: Vector3, c: Color) -> void:
 	m.surface_add_vertex(b)
 
 
-static func s_circle(m: ImmediateMesh, center: Vector3, r: float, c: Color) -> void:
-	var prev := center + Vector3(r, 0, 0)
+static func plane_basis(n: Vector3) -> Array:
+	var nn := n.normalized()
+	var ref := Vector3.RIGHT if absf(nn.dot(Vector3.RIGHT)) < 0.9 else Vector3.FORWARD
+	var u := (ref - nn * ref.dot(nn)).normalized()
+	return [u, u.cross(nn)]
+
+
+static func s_circle(m: ImmediateMesh, center: Vector3, r: float, c: Color, normal := Vector3.UP) -> void:
+	var uv := plane_basis(normal)
+	var u: Vector3 = uv[0]
+	var v: Vector3 = uv[1]
+	var prev := center + u * r
 	for i in range(1, 65):
 		var a := TAU * float(i) / 64.0
-		var p := center + Vector3(cos(a) * r, 0, sin(a) * r)
+		var p := center + (u * cos(a) + v * sin(a)) * r
 		s_line(m, prev, p, c)
 		prev = p
 
@@ -102,11 +112,14 @@ static func s_box(m: ImmediateMesh, center: Vector3, basis: Basis, size: Vector3
 				s_line(m, pts[i], pts[i | bit], c)
 
 
-static func s_chevrons(m: ImmediateMesh, center: Vector3, r: float, dirn: float, c: Color) -> void:
+static func s_chevrons(m: ImmediateMesh, center: Vector3, r: float, dirn: float, c: Color, normal := Vector3.UP) -> void:
+	var uv := plane_basis(normal)
+	var u: Vector3 = uv[0]
+	var v: Vector3 = uv[1]
 	for i in 8:
 		var a := TAU * float(i) / 8.0
-		var p := center + Vector3(cos(a) * r, 0, sin(a) * r)
-		var tang := Vector3(-sin(a), 0, cos(a)) * dirn
+		var p := center + (u * cos(a) + v * sin(a)) * r
+		var tang := (v * cos(a) - u * sin(a)) * dirn
 		s_arrow(m, p - tang * r * 0.05, tang, r * 0.1, c)
 
 
@@ -163,10 +176,10 @@ func _process(_delta: float) -> void:
 		"orbit":
 			var c: Vector3 = arena.orbit_center(p)
 			var r := float(p["radius"])
-			s_circle(im, c, r, GOLD)
-			s_chevrons(im, c, r, float(p["dir"]), GOLD)
+			var on: Vector3 = p.get("normal", Vector3.UP)
+			s_circle(im, c, r, GOLD, on)
+			s_chevrons(im, c, r, float(p["dir"]), GOLD, on)
 			s_line(im, c, sp, DIM)
-			s_line(im, c, Vector3(c.x, sp.y, c.z), DIM)
 		"chase":
 			var t = p.get("target")
 			if t != null and is_instance_valid(t):

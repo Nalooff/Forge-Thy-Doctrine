@@ -99,6 +99,23 @@ func _initialize() -> void:
 	ar.set_map_mode(true)
 	for i in 6:
 		await process_frame
+	# --- orbit on a tilted plane: Alt tilts instead of changing the altitude
+	ar.tuner.begin("orbit")
+	motion(screen_of(dummy.global_position))
+	click(screen_of(dummy.global_position), true)
+	var dp2: Vector3 = dummy.global_position
+	var yring: float = ar.tuner.plane_y
+	motion(screen_of(dp2 + Vector3(250, 0, 0)))
+	motion(screen_of(dp2 + Vector3(250, 0, 0)), true, Vector2(0, -80))
+	check(ar.tuner.tilt > 0.3 and absf(ar.tuner.plane_y - yring) < 0.01, "Orbit: Alt+mouse tilts the plane and leaves the altitude alone (tilt %.0f deg)" % rad_to_deg(ar.tuner.tilt))
+	click(screen_of(dp2 + Vector3(250, 0, 0)), true)
+	var nrm: Vector3 = ar.order_p.get("normal", Vector3.UP)
+	check(ar.order == "orbit" and nrm.dot(Vector3.UP) < 0.95, "tilted orbit order created")
+	var rr := float(ar.order_p["radius"])
+	await run_for(60 * 40)
+	var rel: Vector3 = ar.player.global_position - dummy.global_position
+	print("tilted orbit: radius %.0f, measured %.0f, out of plane %.1f" % [rr, rel.length(), rel.dot(nrm)])
+	check(absf(rel.dot(nrm)) < rel.length() * 0.3 and rel.length() > rr * 0.6 and rel.length() < rr * 1.5, "ship circles in the tilted plane")
 	# --- drive to ship, keep a distance
 	ar.tuner.begin("chase")
 	motion(screen_of(dummy.global_position))

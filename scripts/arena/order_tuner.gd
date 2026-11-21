@@ -19,6 +19,8 @@ var target: Ship
 var center := Vector3.ZERO
 var radius := 300.0
 var orbit_dir := 1.0
+var tilt := 0.0            # tilt of the orbit plane (rad) around a horizontal axis
+var tilt_axis := 0.0       # direction of that axis in the horizontal plane (rad)
 var points: Array = []
 var banner := ""
 var _press := false
@@ -52,6 +54,8 @@ func begin(k: String) -> void:
 	points = []
 	target = null
 	orbit_dir = 1.0
+	tilt = 0.0
+	tilt_axis = 0.0
 	_reset_press()
 	_prev_order = arena.order
 	_prev_p = (arena.order_p as Dictionary).duplicate(true)
@@ -115,7 +119,7 @@ func _update_banner() -> void:
 		"chase":
 			banner = ("DRIVE TO SHIP   click the ship to follow" if step == "ship" else "DRIVE TO SHIP   mouse distance = distance to keep   click: confirm") + common
 		"orbit":
-			banner = ("ORBIT   click a ship, or empty space for a point" if step == "ship" else "ORBIT   mouse distance = radius   R: flip direction   click: confirm") + common
+			banner = ("ORBIT   click a ship, or empty space for a point" + common) if step == "ship" else "ORBIT   mouse distance = radius   Alt+mouse: tilt the orbit plane (up/down), turn its axis (left/right)   R: flip direction   click: confirm   Esc: cancel"
 		"lookat":
 			banner = "FACE   click a ship or a point (the ship turns and keeps its speed)" + common
 		"follow":
@@ -130,7 +134,9 @@ func status_line() -> String:
 	var p: Ship = arena.player
 	var s := "plane altitude %+d m" % int(plane_y - p.global_position.y)
 	if step == "ring":
-		s += "   radius %s" % WaypointViz.fmt_dist(radius)
+		s = "radius %s" % WaypointViz.fmt_dist(radius)
+		if kind == "orbit":
+			s += "   tilt %d deg   axis %d deg" % [int(rad_to_deg(tilt)), int(fposmod(rad_to_deg(tilt_axis), 360.0))]
 	return s
 
 
@@ -142,6 +148,9 @@ func handle(event: InputEvent) -> bool:
 		if event.keycode == KEY_R and kind == "orbit" and step == "ring":
 			orbit_dir = -orbit_dir
 			return true
+		if (event.keycode == KEY_PAGEUP or event.keycode == KEY_PAGEDOWN) and step == "ring" and kind == "orbit":
+			tilt = clampf(tilt + 0.1 * (1.0 if event.keycode == KEY_PAGEUP else -1.0), -PI * 0.5, PI * 0.5)
+			return true
 		if event.keycode == KEY_PAGEUP or event.keycode == KEY_PAGEDOWN:
 			plane_y += _alt_step() * 8.0 * (1.0 if event.keycode == KEY_PAGEUP else -1.0)
 			hover.y = plane_y
@@ -149,7 +158,11 @@ func handle(event: InputEvent) -> bool:
 		return false
 	if event is InputEventMouseMotion:
 		if event.alt_pressed or Input.is_key_pressed(KEY_ALT):
-			if _drag:
+			if step == "ring" and kind == "orbit":
+				tilt = clampf(tilt - event.relative.y * 0.01, -PI * 0.5, PI * 0.5)
+				tilt_axis += event.relative.x * 0.01
+				_update_hover(event.position, true)
+			elif _drag:
 				_head_pitch = clampf(_head_pitch - event.relative.y * 0.01, -1.4, 1.4)
 			else:
 				plane_y -= event.relative.y * _alt_step()
@@ -187,14 +200,28 @@ func heading() -> Vector3:
 	return Vector3(_head_dir.x * cos(_head_pitch), sin(_head_pitch), _head_dir.z * cos(_head_pitch)).normalized()
 
 
+func orbit_normal() -> Vector3:
+	var axis := Vector3(cos(tilt_axis), 0.0, sin(tilt_axis))
+	return Vector3.UP.rotated(axis, tilt)
+
+
 func _center_pos() -> Vector3:
 	if target != null and is_instance_valid(target):
 		return target.global_position
 	return center
 
 
-func _update_hover(mp: Vector2) -> void:
+func _update_hover(mp: Vector2, keep_plane := false) -> void:
 	hover_ship = arena.pick_ship(mp) if step == "ship" else null
+	if step == "ring" and kind == "orbit":
+		var cc := _center_pos()
+		var hn = arena._plane_hit_n(mp, cc, orbit_normal())
+		if hn != null:
+			hover = hn
+			has_hover = true
+		if has_hover:
+			radius = clampf((hover - cc).length(), maxf(float(arena.player.stats["longest"]) * 1.2, 30.0), 30000.0)
+		return
 	var h = arena._plane_hit(mp, plane_y)
 	if h != null:
 		hover = h
@@ -268,7 +295,7 @@ func _on_press(mp: Vector2, shift: bool) -> void:
 			if has_hover:
 				var c := _center_pos()
 				if kind == "orbit":
-					arena.order_orbit(target, center, radius, plane_y - c.y, orbit_dir)
+					arena.order_orbit(target, center, radius, orbit_normal(), orbit_dir)
 				else:
 					arena.order_chase(target, radius)
 				_end(false)
@@ -322,15 +349,27 @@ func _process(_delta: float) -> void:
 	var ext := WaypointViz.nice(maxf(camd * 0.9, 200.0))
 	var sp_grid := WaypointViz.nice(ext / 8.0)
 	_im.surface_begin(Mesh.PRIMITIVE_LINES)
-	# the plane
+	# the plane (tilted when choosing an orbit)
 	var n := int(ceil(ext / sp_grid))
-	var gx: float = floorf(origin.x / sp_grid) * sp_grid
-	var gz: float = floorf(origin.z / sp_grid) * sp_grid
-	for i in range(-n, n + 1):
-		WaypointViz.s_line(_im, Vector3(gx + i * sp_grid, plane_y, origin.z - ext), Vector3(gx + i * sp_grid, plane_y, origin.z + ext), grid)
-		WaypointViz.s_line(_im, Vector3(origin.x - ext, plane_y, gz + i * sp_grid), Vector3(origin.x + ext, plane_y, gz + i * sp_grid), grid)
+	if step == "ring" and kind == "orbit":
+		var on := orbit_normal()
+		var uv := WaypointViz.plane_basis(on)
+		var gu: Vector3 = uv[0]
+		var gv: Vector3 = uv[1]
+		var oc := Vector3(origin.x, plane_y, origin.z)
+		for i in range(-n, n + 1):
+			WaypointViz.s_line(_im, oc + gu * (i * sp_grid) - gv * ext, oc + gu * (i * sp_grid) + gv * ext, grid)
+			WaypointViz.s_line(_im, oc + gv * (i * sp_grid) - gu * ext, oc + gv * (i * sp_grid) + gu * ext, grid)
+		var ax := Vector3(cos(tilt_axis), 0.0, sin(tilt_axis))
+		WaypointViz.s_line(_im, oc - ax * ext, oc + ax * ext, Color(1.0, 0.95, 0.75, 0.5))
+	else:
+		var gx: float = floorf(origin.x / sp_grid) * sp_grid
+		var gz: float = floorf(origin.z / sp_grid) * sp_grid
+		for i in range(-n, n + 1):
+			WaypointViz.s_line(_im, Vector3(gx + i * sp_grid, plane_y, origin.z - ext), Vector3(gx + i * sp_grid, plane_y, origin.z + ext), grid)
+			WaypointViz.s_line(_im, Vector3(origin.x - ext, plane_y, gz + i * sp_grid), Vector3(origin.x + ext, plane_y, gz + i * sp_grid), grid)
 	# height reference: from the ship straight to the plane
-	if absf(plane_y - sp.y) > 0.5:
+	if absf(plane_y - sp.y) > 0.5 and not (step == "ring" and kind == "orbit"):
 		WaypointViz.s_line(_im, sp, Vector3(sp.x, plane_y, sp.z), dim)
 		WaypointViz.s_circle(_im, Vector3(sp.x, plane_y, sp.z), maxf(float(arena.player.stats["longest"]) * 0.5, 2.0), dim)
 	if hover_ship != null and is_instance_valid(hover_ship):
@@ -353,9 +392,10 @@ func _process(_delta: float) -> void:
 	elif step == "ring" and has_hover:
 		var c := _center_pos()
 		var cc := Vector3(c.x, plane_y, c.z)
-		WaypointViz.s_circle(_im, cc, radius, amber)
+		var ringn := orbit_normal() if kind == "orbit" else Vector3.UP
+		WaypointViz.s_circle(_im, cc, radius, amber, ringn)
 		if kind == "orbit":
-			WaypointViz.s_chevrons(_im, cc, radius, orbit_dir, amber)
+			WaypointViz.s_chevrons(_im, cc, radius, orbit_dir, amber, ringn)
 		WaypointViz.s_line(_im, cc, hover, dim)
 		WaypointViz.s_diamond(_im, hover, u * 0.6, amber)
 	elif step == "offset" and has_hover and target != null and is_instance_valid(target):

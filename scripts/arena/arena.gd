@@ -381,6 +381,18 @@ func _plane_hit(mp: Vector2, y: float) -> Variant:
 	return o + d * t
 
 
+func _plane_hit_n(mp: Vector2, point: Vector3, normal: Vector3) -> Variant:
+	var o := rig.cam.project_ray_origin(mp)
+	var d := rig.cam.project_ray_normal(mp)
+	var den := normal.dot(d)
+	if absf(den) < 0.02:
+		return null
+	var t := normal.dot(point - o) / den
+	if t < 0.0 or t > 80000.0:
+		return null
+	return o + d * t
+
+
 func _go_to_cursor() -> void:
 	if player == null or not player.alive:
 		return
@@ -491,9 +503,9 @@ func order_route(pts: Array, end_dir := Vector3.ZERO) -> void:
 	hud.say("Route: %d points" % pts.size(), Color(1.0, 0.8, 0.3))
 
 
-func order_orbit(t: Ship, c: Vector3, r: float, alt: float, dirn: float) -> void:
+func order_orbit(t: Ship, c: Vector3, r: float, normal: Vector3, dirn: float) -> void:
 	order = "orbit"
-	order_p = {"target": t, "center": c, "radius": r, "alt": alt, "dir": dirn}
+	order_p = {"target": t, "center": c, "radius": r, "alt": 0.0, "normal": normal.normalized(), "dir": dirn}
 	hud.say("Orbiting at %s" % WaypointViz.fmt_dist(r), Color(1.0, 0.8, 0.3))
 
 
@@ -577,7 +589,8 @@ func order_text() -> String:
 		"chase":
 			return "drive to ship, keep %s" % WaypointViz.fmt_dist(float(order_p.get("dist", 0.0)))
 		"orbit":
-			return "orbit, radius %s" % WaypointViz.fmt_dist(float(order_p.get("radius", 0.0)))
+			var tilt := int(rad_to_deg(acos(clampf((order_p.get("normal", Vector3.UP) as Vector3).dot(Vector3.UP), -1.0, 1.0))))
+			return "orbit, radius %s, tilt %d deg" % [WaypointViz.fmt_dist(float(order_p.get("radius", 0.0))), tilt]
 		"follow":
 			return "follow with offset"
 		"lookat":
@@ -813,7 +826,7 @@ func _order_cmd() -> Dictionary:
 			if ot != null and is_instance_valid(ot) and ot.alive:
 				order_p["center"] = ot.global_position
 				tv = ot.linear_velocity
-			cmd = Autopilot.orbit(player, orbit_center(order_p), float(order_p["radius"]), minf(sl, 80.0), float(order_p["dir"]), tv)
+			cmd = Autopilot.orbit(player, orbit_center(order_p), float(order_p["radius"]), minf(sl, 80.0), float(order_p["dir"]), tv, order_p.get("normal", Vector3.UP))
 		"lookat":
 			cmd = Autopilot.face(player, lookat_point(order_p))
 	return cmd

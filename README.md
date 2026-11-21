@@ -87,7 +87,7 @@ Assisted flight (X) turns the keys into a target speed (speed limiter); manual f
 Orders live in the Movement panel. Most of them **hide the panel and let you shape the order in the 3D view**; a click confirms, **Esc** cancels, **Alt + mouse** (or PageUp/PageDown) changes the height, and click-dragging adds an optional final heading:
 - **Drive to point**: a plane appears at your altitude, your ship turns to look at the cursor point, click to go.
 - **Drive to ship**: click a ship, the mouse distance sets the distance to keep.
-- **Orbit**: click a ship (or empty space), the circle radius follows the mouse, **R** flips the direction.
+- **Orbit**: click a ship (or empty space), the circle radius follows the mouse (measured on the orbit plane), **Alt + mouse** tilts the orbit plane (up/down) and turns its tilt axis (left/right), **R** flips the direction. The ship flies a full circle in that tilted plane.
 - **Face**: click a ship or point; the ship turns and keeps its speed.
 - **Follow offset**: click the leader, place a ghost of your ship where you want it (optionally a heading); formation is kept in the leader's frame.
 - **Route**: Shift+click adds points, a plain click ends the route.
