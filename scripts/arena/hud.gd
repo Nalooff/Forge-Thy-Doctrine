@@ -7,8 +7,8 @@ extends CanvasLayer
 ## Layout numbers are in a 1600x900 reference viewport and are shrunk by UI_SCALE around the bottom centre.
 
 const UI_SCALE := 0.78
-const MODES := ["Movement", "Combat", "Defense", "Sensors", "Comms", "Crew Cmd", "Boarding", "Hangar/Fleet", "Power & Systems", "AI/Auto", "Tactical Map"]
-const MODE_SHORT := {"Hangar/Fleet": "Hangar", "Power & Systems": "Power/Sys", "Tactical Map": "Tac Map"}
+const MODES := ["Movement", "Combat", "Defense", "Sensors", "Comms", "Crew Cmd", "Boarding", "Hangar/Fleet", "Power & Systems", "AI/Auto"]
+const MODE_SHORT := {"Hangar/Fleet": "Hangar", "Power & Systems": "Power/Sys"}
 const MODE_NEEDS := {
 	"Defense": "a Defense Bay (not in this prototype)", "Comms": "a Communication Room / Dish (roadmap step 3+)",
 	"Crew Cmd": "crew simulation (roadmap step 6)", "Boarding": "Breach Pods and Doors (roadmap step 6)",
@@ -33,6 +33,7 @@ var sub_open := false
 var radar_zoom := 1200.0
 var speed_limit := 150.0
 var _sub_was_open := false
+var weapon_list: ItemList
 var root: Control
 var overlay: Control
 var radar: Control
@@ -417,6 +418,7 @@ class Overlay extends Control:
 			var d := hud.ship.global_position.distance_to(wp)
 			Hud.outlined(self, "%s %s  %dm" % ["LOCK" if locked else "", o.name, int(d)], p + Vector2(r + 4, 4), 12, col2)
 		_draw_waypoint(cam)
+		_draw_assignments(cam)
 		if hud.arena.rig.map_mode:
 			_draw_map(cam)
 		var tn: OrderTuner = hud.arena.tuner
@@ -426,6 +428,19 @@ class Overlay extends Control:
 
 	static func fmt_dist(m: float) -> String:
 		return "%d m" % int(m) if m < 1000.0 else "%.1f km" % (m / 1000.0)
+
+	func _draw_assignments(cam: Camera3D) -> void:
+		var counts := {}
+		for u in hud.arena.weapon_units():
+			if String(u["tmode"]) == "ship":
+				var t = u["tgt"]
+				if t != null and is_instance_valid(t) and t.alive:
+					counts[t] = int(counts.get(t, 0)) + 1
+		for t in counts:
+			if cam.is_position_behind(t.global_position):
+				continue
+			var p := cam.unproject_position(t.global_position)
+			Hud.outlined(self, "<< %d turret%s" % [counts[t], "" if counts[t] == 1 else "s"], p + Vector2(16, 20), 12, Color(1.0, 0.45, 0.3))
 
 	func _draw_waypoint(cam: Camera3D) -> void:
 		var ar = hud.arena
@@ -1074,8 +1089,6 @@ func set_mode(m: String) -> void:
 		_refresh_mode_label()
 		return
 	mode = m
-	if m == "Tactical Map" and arena != null and not arena.rig.map_mode:
-		arena.set_map_mode(true)
 	sub_open = true
 	sub_panel.visible = true
 	sub_panel.title = m.to_upper()
@@ -1089,7 +1102,7 @@ func set_mode(m: String) -> void:
 		_refresh_mode_label()
 		return
 	match m:
-		"Movement", "Tactical Map":
+		"Movement":
 			_sub_movement()
 		"Combat":
 			_sub_combat()
@@ -1193,8 +1206,71 @@ func _sub_combat() -> void:
 	sub_body.add_child(row)
 	_button("Lock target (T)", row, func(): arena.lock_target(), 10)
 	_button("Clear lock", row, func(): arena.clear_lock(), 10)
-	_label("LMB fires every linked barrel; with a lock, barrels lead the target.", sub_body, 10)
-	_make_sub_text()
+	_label("Turrets: click to toggle selection. LMB fires them all, each at its own target.", sub_body, 9)
+	weapon_list = ItemList.new()
+	weapon_list.select_mode = ItemList.SELECT_TOGGLE
+	weapon_list.custom_minimum_size = Vector2(0, 66)
+	weapon_list.add_theme_font_size_override("font_size", 10)
+	weapon_list.multi_selected.connect(func(_i: int, _on: bool): _weapon_list_changed())
+	weapon_list.item_selected.connect(func(_i: int): _weapon_list_changed())
+	sub_body.add_child(weapon_list)
+	_label("Quick select", sub_body, 9)
+	var q := GridContainer.new()
+	q.columns = 5
+	q.add_theme_constant_override("h_separation", 3)
+	q.add_theme_constant_override("v_separation", 3)
+	sub_body.add_child(q)
+	for pair in [["All", "all"], ["None", "none"], ["Invert", "invert"], ["Best", "best"], ["In arc", "arc"],
+			["Idle", "idle"], ["Kinetic", "kinetic"], ["Laser", "laser"], ["Missile", "missile"], ["Online", "online"]]:
+		var k: String = pair[1]
+		var qb := _button(pair[0], q, func(): arena.select_weapons(k), 10)
+		qb.custom_minimum_size = Vector2(60, 20)
+		if k == "best":
+			qb.tooltip_text = "The strongest online turrets that can hit the locked (or nearest) target right now"
+		elif k == "arc":
+			qb.tooltip_text = "Turrets that can point at the locked (or nearest) target right now"
+		elif k == "idle":
+			qb.tooltip_text = "Turrets that follow the main lock (no own target)"
+	_label("Send the selected turrets at", sub_body, 9)
+	var ar := HBoxContainer.new()
+	sub_body.add_child(ar)
+	_button("Pick a ship...", ar, func(): arena.tuner.begin("wpick"), 10)
+	_button("Nearest enemy", ar, func(): arena.assign_nearest(), 10)
+	_button("Locked target", ar, func(): arena.assign_weapons(null, "main"), 10)
+	_button("Cursor aim", ar, func(): arena.assign_weapons(null, "cursor"), 10)
+	_make_sub_text(30)
+	refresh_weapons()
+
+
+func _weapon_list_changed() -> void:
+	var ids: Array = []
+	for i in weapon_list.get_selected_items():
+		ids.append(weapon_list.get_item_metadata(i))
+	arena.sel_weapons = ids
+	_refresh_sub()
+
+
+## Keeps the turret list in step with the ship (texts) and with arena.sel_weapons (selection).
+func refresh_weapons() -> void:
+	if weapon_list == null or not is_instance_valid(weapon_list) or arena == null:
+		return
+	var units: Array = arena.weapon_units()
+	if weapon_list.item_count != units.size():
+		weapon_list.clear()
+		for u in units:
+			var i := weapon_list.add_item(arena.weapon_unit_text(u))
+			weapon_list.set_item_metadata(i, u["id"])
+	else:
+		for i in units.size():
+			weapon_list.set_item_text(i, arena.weapon_unit_text(units[i]))
+			weapon_list.set_item_metadata(i, units[i]["id"])
+	for i in weapon_list.item_count:
+		var want: bool = arena.sel_weapons.has(weapon_list.get_item_metadata(i))
+		if want != weapon_list.is_selected(i):
+			if want:
+				weapon_list.select(i, false)
+			else:
+				weapon_list.deselect(i)
 
 
 func _sub_sensors() -> void:
@@ -1227,7 +1303,7 @@ func _refresh_sub() -> void:
 		return
 	var t := ""
 	match mode:
-		"Movement", "Tactical Map":
+		"Movement":
 			t += "Order: [color=#ffe680]%s[/color]\n" % arena.order_text()
 			t += "Facing: [color=#ffe680]%s[/color]\n" % arena.facing_text()
 			var vl := ship.global_transform.basis.inverse() * ship.linear_velocity
@@ -1237,16 +1313,12 @@ func _refresh_sub() -> void:
 			t += "RCS %.0f kN (10%% of best vector)   Mass %.0f t\n" % [ship.rcs_cap, ship.mass]
 
 		"Combat":
-			for m in ship.mods_of("barrel"):
-				var ws: Dictionary = m["ws"]
-				var state := "[color=#ff4030]OFFLINE[/color]"
-				if ship.module_online(m):
-					state = "[color=#ffe680]READY[/color]" if float(m["cool"]) <= 0.0 else "[color=#ff8030]CYCLING[/color]"
-				var ammo := "" if int(m["ammo"]) < 0 else "  ammo %d" % int(m["ammo"])
-				var mount_txt := "MOUNTED on bay #%d" % int(m["bay"]) if ship._mounted(m) else "FIXED"
-				t += "Barrel #%d  %s  %s  dmg %.0f  pen %.2f  %s%s\n" % [m["id"], String(ws["kind"]).to_upper(), mount_txt, ws["damage"], ws["pen"], state, ammo]
+			refresh_weapons()
+			t += "%d turret(s) selected\n" % arena.sel_weapons.size()
 			if ship.target != null and is_instance_valid(ship.target) and ship.target.alive:
-				t += "\nTarget: [color=#ffe680]%s[/color]  %d m  hull %d%%" % [ship.target.name, int(ship.global_position.distance_to(ship.target.global_position)), int(ship.target.hull_hp / ship.target.hull_hp_max * 100.0)]
+				t += "Main lock: [color=#ffe680]%s[/color]  %d m  hull %d%%" % [ship.target.name, int(ship.global_position.distance_to(ship.target.global_position)), int(ship.target.hull_hp / ship.target.hull_hp_max * 100.0)]
+			else:
+				t += "No main lock (press T)"
 		"Sensors":
 			var contacts: Array = []
 			for s in get_tree().get_nodes_in_group("ships"):

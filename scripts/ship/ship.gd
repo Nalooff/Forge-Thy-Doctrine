@@ -137,6 +137,7 @@ func _make_module(m: Dictionary) -> void:
 		"cool": 0.0, "ammo": -1, "aim": ShipData.DIRS[int(m["dir"])], "ws": {}, "len": 0.0, "engine": -1, "ef": 1.0,
 		"bay": -1, "ctrls": [], "mount": ShipData.DIRS[int(m["dir"])], "cur_pos": ShipData.v3(m["pos"]), "q": Quaternion.IDENTITY,
 		"barrels": [], "slew": 1.5, "limit": 75.0,
+		"tmode": "main", "tgt": null,
 	}
 	if m["type"] == "thruster":
 		rm["engine"] = ShipData.thruster_engine(bp, int(m["id"]))
@@ -474,12 +475,70 @@ func _mounted(m: Dictionary) -> bool:
 	return not bay.is_empty() and bool(bay["alive"])
 
 
+## Ship a barrel is told to engage: its own assignment, the main lock, or nothing (cursor aim).
+func barrel_aim_target(m: Dictionary) -> Variant:
+	match String(m.get("tmode", "main")):
+		"cursor":
+			return null
+		"ship":
+			var t = m.get("tgt", null)
+			if t != null and is_instance_valid(t) and (t as Ship).alive:
+				return t
+	return cmd.get("aim_target", null)
+
+
+## Weapon units = what the commander selects: a Turret Bay with the barrels on it, or a fixed barrel.
+func weapon_units() -> Array:
+	var out: Array = []
+	for m in mods:
+		if m["type"] == "turret_bay" and not (m["barrels"] as Array).is_empty():
+			out.append(_weapon_unit(int(m["id"]), "bay", m["barrels"]))
+		elif m["type"] == "barrel" and int(m["bay"]) < 0:
+			out.append(_weapon_unit(int(m["id"]), "fixed", [int(m["id"])]))
+	return out
+
+
+func _weapon_unit(id: int, kind: String, ids: Array) -> Dictionary:
+	var kinds := {}
+	var dps := 0.0
+	var ammo := 0
+	var rng := INF
+	var online := false
+	for bid in ids:
+		var b: Dictionary = by_id[int(bid)]
+		var ws: Dictionary = b["ws"]
+		kinds[String(ws["kind"])] = true
+		dps += float(ws["damage"]) / maxf(float(ws["interval"]), 0.01)
+		rng = minf(rng, float(ws["range"]))
+		if int(ws["ammo"]) >= 0:
+			ammo += int(b["ammo"])
+		online = online or (bool(b["alive"]) and _barrel_controlled(b))
+	var ref: Dictionary = by_id[id]
+	var first: Dictionary = by_id[int(ids[0])]
+	return {"id": id, "kind": kind, "barrels": ids.duplicate(), "kinds": kinds.keys(), "dps": dps, "range": rng, "ammo": ammo,
+		"online": online, "pos": ref["pos"], "tmode": String(first.get("tmode", "main")), "tgt": first.get("tgt", null),
+		"label": "%s #%d" % [ref["label"], id], "barrel_count": ids.size()}
+
+
+## Can this unit point at the ship right now (inside its slew arc / aligned when fixed, inside range)?
+func unit_can_hit(u: Dictionary, t: Ship) -> bool:
+	var ref: Dictionary = by_id[int(u["id"])]
+	var first: Dictionary = by_id[int((u["barrels"] as Array)[0])]
+	var mount: Vector3 = first["mount"]
+	var lim := deg_to_rad(float(ref["limit"])) if u["kind"] == "bay" else deg_to_rad(4.0)
+	var rel := t.global_position - to_global(ref["pos"])
+	if rel.length() > float(u["range"]):
+		return false
+	var want := (global_transform.basis.inverse() * rel).normalized()
+	return mount.angle_to(want) <= lim
+
+
 ## World point a barrel should be pointed at (lead aiming when a target is locked).
 func _barrel_aim_world(m: Dictionary) -> Vector3:
 	var basis := global_transform.basis
 	var origin := to_global(m["cur_pos"])
 	var ws: Dictionary = m["ws"]
-	var tgt = cmd.get("aim_target", null)
+	var tgt = barrel_aim_target(m)
 	if tgt != null and is_instance_valid(tgt) and (tgt as Ship).alive:
 		var sp := float(ws["speed"]) if ws["kind"] == "kinetic" else 0.0
 		return lead_point(origin, sp, (tgt as Ship).global_position, (tgt as Ship).linear_velocity, linear_velocity)
@@ -537,7 +596,7 @@ func _update_barrels(delta: float) -> void:
 		var muzzle: Vector3 = (m["cur_pos"] as Vector3) + aim * (float(m["len"]) * 0.5 + 0.3)
 		var blocked := ShipData.hull_contains(bp["rings"], muzzle + aim * 1.5)
 		if cmd.get("fire", false) and float(m["cool"]) <= 0.0 and float(m["frac"]) > 0.3 and ok and not blocked and int(m["ammo"]) != 0:
-			_fire(m, cmd.get("aim_target", null))
+			_fire(m, barrel_aim_target(m))
 
 
 func _fire(m: Dictionary, tgt) -> void:

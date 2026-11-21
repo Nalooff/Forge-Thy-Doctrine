@@ -95,6 +95,9 @@ Orders live in the Movement panel. Most of them **hide the panel and let you sha
 - **Facing while moving**: Auto (travel direction), Lock heading, Lock direction, Face point.
 M opens the tactical map (long range picking), G drives to the point under the cursor.
 
+## Weapons
+Combat panel: the lock (T) is the default target of every turret. Select turrets in the list (click toggles) or with the quick buttons: **All, None, Invert, Best** (strongest online turrets that can hit the locked/nearest target now), **In arc**, **Idle** (turrets without their own target), **Kinetic / Laser / Missile**, **Online**. Then send them at a ship (**Pick a ship...** hides the panel, click the ship), the **nearest enemy**, the **locked target**, or the **cursor**. LMB fires every turret, each at its own target; fixed barrels only fire straight ahead, so their target mainly guides missiles.
+
 ## Look and fonts
 `scripts/ui/ui_style.gd` holds the shared theme (black iron, ember orange, dark red borders) and fonts: Cinzel for titles/buttons, Barlow Condensed for text (SIL OFL 1.1, licenses in `assets/fonts/`).
 

@@ -4,7 +4,7 @@ extends Node3D
 ## shape the order in the 3D view (plane, circle, ghost ship...). A click confirms, Esc cancels.
 ## Common controls: Alt + mouse (or PageUp/PageDown) = height, click-drag = optional final heading.
 ##
-## kinds: point, route, chase, orbit, lookat, follow, lockdir, facepoint
+## kinds: point, route, chase, orbit, lookat, follow, lockdir, facepoint, wpick (assign the selected turrets)
 ## steps: plane (cursor on a horizontal plane), ship (pick a ship), ring (radius circle), offset (ghost ship)
 
 var arena: Node
@@ -62,7 +62,7 @@ func begin(k: String) -> void:
 	arena.rig.first_person = false
 	arena._apply_mouse_mode()
 	plane_y = arena.player.global_position.y
-	step = "ship" if k in ["chase", "orbit", "lookat", "follow", "facepoint"] else "plane"
+	step = "ship" if k in ["chase", "orbit", "lookat", "follow", "facepoint", "wpick"] else "plane"
 	has_hover = false
 	_update_banner()
 	arena.hud.hide_sub()
@@ -128,6 +128,8 @@ func _update_banner() -> void:
 			banner = "LOCK DIRECTION   point the arrow with the mouse   click: lock it (the ship keeps this heading while moving)" + common
 		"facepoint":
 			banner = "FACE POINT WHILE MOVING   click a ship or a point" + common
+		"wpick":
+			banner = "ASSIGN TARGET   click a ship: the %d selected turret(s) will engage it   Esc: cancel" % arena.sel_weapons.size()
 
 
 func status_line() -> String:
@@ -280,6 +282,9 @@ func _on_press(mp: Vector2, shift: bool) -> void:
 					"facepoint":
 						arena.set_facing_point(target, Vector3.ZERO)
 						_end(false)
+					"wpick":
+						arena.assign_weapons(target, "ship")
+						_end(false)
 			elif kind in ["orbit", "lookat", "facepoint"] and has_hover:
 				center = hover
 				match kind:
@@ -351,7 +356,9 @@ func _process(_delta: float) -> void:
 	_im.surface_begin(Mesh.PRIMITIVE_LINES)
 	# the plane (tilted when choosing an orbit)
 	var n := int(ceil(ext / sp_grid))
-	if step == "ring" and kind == "orbit":
+	if kind == "wpick":
+		pass
+	elif step == "ring" and kind == "orbit":
 		var on := orbit_normal()
 		var uv := WaypointViz.plane_basis(on)
 		var gu: Vector3 = uv[0]

@@ -28,6 +28,7 @@ var waypoint := Vector3.ZERO
 var has_wp := false
 var viz: WaypointViz
 var tuner: OrderTuner
+var sel_weapons: Array = []   # ids of the selected weapon units (Turret Bays / fixed barrels)
 var order_p := {}          # parameters of the active order
 var facing := {"mode": "auto"}   # facing while moving: auto (travel), lock (fixed direction), point
 var _wp_drag := 0          # 0 none, 1 dragging on the XZ plane, 2 dragging altitude
@@ -152,6 +153,7 @@ func _spawn_player(pos: Vector3, dir: Vector3) -> void:
 	has_wp = false
 	_wp_drag = 0
 	order_p = {}
+	sel_weapons = []
 	facing = {"mode": "auto"}
 	if tuner != null:
 		tuner.abort()
@@ -629,6 +631,129 @@ func pick_ship(mp: Vector2) -> Ship:
 			bd = perp
 			best = s
 	return best
+
+
+func weapon_units() -> Array:
+	return player.weapon_units() if player != null and is_instance_valid(player) else []
+
+
+func _weapon_ref_target() -> Ship:
+	var t = player.target
+	if t != null and is_instance_valid(t) and t.alive:
+		return t
+	var best: Ship = null
+	var bd := INF
+	for n in get_tree().get_nodes_in_group("ships"):
+		var o := n as Ship
+		if o == player or not o.alive or o.team == player.team:
+			continue
+		var d := player.global_position.distance_to(o.global_position)
+		if d < bd:
+			bd = d
+			best = o
+	return best
+
+
+## Quick selections for the turret list: all, none, invert, kinetic/laser/missile, best, arc, idle, online.
+func select_weapons(kind: String) -> void:
+	var units := weapon_units()
+	var out: Array = []
+	var ref := _weapon_ref_target()
+	var best_score := 0.0
+	var scores := {}
+	if kind == "best":
+		for u in units:
+			var sc := 0.0
+			if u["online"] and (int(u["ammo"]) != 0 or int(u["barrel_count"]) > 0):
+				sc = float(u["dps"])
+				if ref != null and not player.unit_can_hit(u, ref):
+					sc = 0.0
+			scores[u["id"]] = sc
+			best_score = maxf(best_score, sc)
+	for u in units:
+		var pick := false
+		match kind:
+			"all":
+				pick = true
+			"invert":
+				pick = not sel_weapons.has(u["id"])
+			"kinetic", "laser", "missile":
+				pick = (u["kinds"] as Array).has(kind)
+			"online":
+				pick = bool(u["online"])
+			"idle":
+				pick = String(u["tmode"]) == "main"
+			"arc":
+				pick = ref != null and bool(u["online"]) and player.unit_can_hit(u, ref)
+			"best":
+				pick = best_score > 0.0 and float(scores[u["id"]]) >= best_score * 0.7
+		if pick:
+			out.append(u["id"])
+	sel_weapons = out
+	hud.refresh_weapons()
+	if kind == "best" and out.is_empty():
+		hud.say("No turret can hit a target right now", Color(1, 0.8, 0.3))
+
+
+## Point the selected turrets at a ship ("ship"), back to the locked target ("main") or at the cursor ("cursor").
+func assign_weapons(t: Ship, mode: String) -> void:
+	var n := 0
+	for u in weapon_units():
+		if not sel_weapons.has(u["id"]):
+			continue
+		for bid in u["barrels"]:
+			var m: Dictionary = player.by_id[int(bid)]
+			m["tmode"] = mode
+			m["tgt"] = t if mode == "ship" else null
+		n += 1
+	if n == 0:
+		hud.say("Select some turrets first", Color(1, 0.8, 0.3))
+		return
+	match mode:
+		"ship":
+			hud.say("%d turret(s) -> %s" % [n, t.name], Color(1.0, 0.8, 0.3))
+		"cursor":
+			hud.say("%d turret(s) follow the cursor" % n, Color(1.0, 0.8, 0.3))
+		_:
+			hud.say("%d turret(s) follow the locked target" % n, Color(1.0, 0.8, 0.3))
+	hud.refresh_weapons()
+
+
+func assign_nearest() -> void:
+	var t := _weapon_ref_target()
+	if t == null:
+		hud.say("No enemy to target", Color(1, 0.8, 0.3))
+		return
+	assign_weapons(t, "ship")
+
+
+func weapon_unit_text(u: Dictionary) -> String:
+	var kinds := ""
+	for k in u["kinds"]:
+		kinds += String(k).substr(0, 3).to_upper() + " "
+	var tgt := "lock"
+	match String(u["tmode"]):
+		"cursor":
+			tgt = "cursor"
+		"ship":
+			var t = u["tgt"]
+			if t != null and is_instance_valid(t) and t.alive:
+				tgt = "%s %dm" % [t.name, int(player.global_position.distance_to(t.global_position))]
+			else:
+				tgt = "lock (target lost)"
+	var ammo := "" if int(u["ammo"]) <= 0 and not (u["kinds"] as Array).has("missile") else "  ammo %d" % int(u["ammo"])
+	return "%s  %dx %s dps %d%s  ->  %s%s" % [u["label"], int(u["barrel_count"]), kinds, int(u["dps"]), ammo, tgt, "" if u["online"] else "  OFFLINE"]
+
+
+func has_weapon_viz() -> bool:
+	if player == null or not is_instance_valid(player):
+		return false
+	if not sel_weapons.is_empty():
+		return true
+	for u in weapon_units():
+		if String(u["tmode"]) != "main":
+			return true
+	return false
 
 
 func lock_target() -> void:

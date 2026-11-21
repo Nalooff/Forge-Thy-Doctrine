@@ -129,7 +129,8 @@ func _process(_delta: float) -> void:
 	if arena == null or arena.player == null or not is_instance_valid(arena.player) or not arena.player.alive:
 		return
 	var map: bool = arena.rig.map_mode
-	if not map and not arena.has_order_viz():
+	var wviz: bool = arena.has_weapon_viz()
+	if not map and not wviz and not arena.has_order_viz():
 		return
 	var cam: Camera3D = arena.rig.cam
 	var sp: Vector3 = arena.player.global_position
@@ -200,6 +201,16 @@ func _process(_delta: float) -> void:
 			var lp: Vector3 = arena.lookat_point(p)
 			s_line(im, sp, lp, DIM)
 			s_diamond(im, lp, clampf(cam.global_position.distance_to(lp) * 0.008, 1.0, 2000.0), GOLD)
+	# turret assignments: a line from each assigned turret to its target, a ring on the selected ones
+	if wviz:
+		for u in arena.weapon_units():
+			var tp: Vector3 = arena.player.to_global(u["pos"])
+			if arena.sel_weapons.has(u["id"]):
+				s_circle(im, tp, clampf(cam.global_position.distance_to(tp) * 0.012, 0.6, 400.0), Color(1.0, 0.95, 0.75, 0.95), (cam.global_position - tp).normalized())
+			if String(u["tmode"]) == "ship":
+				var tt = u["tgt"]
+				if tt != null and is_instance_valid(tt) and tt.alive:
+					s_line(im, tp, tt.global_position, Color(1.0, 0.35, 0.22, 0.55))
 	# facing-while-moving indicator
 	var fm: Dictionary = arena.facing
 	if fm["mode"] == "lock":
