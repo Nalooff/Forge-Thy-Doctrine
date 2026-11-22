@@ -23,6 +23,7 @@ static func dart() -> Dictionary:
 	ShipData.add_module(bp, "barrel", Vector3(-1.9, 0, -6.4), Vector3(0.6, 0.6, 3.2), 0, "kinetic")
 	ShipData.add_module(bp, "barrel", Vector3(1.9, 0, -6.4), Vector3(0.6, 0.6, 3.2), 0, "kinetic")
 	ShipData.auto_link(bp)
+	Interior.auto_connect(bp)
 	return bp
 
 
@@ -34,6 +35,7 @@ static func lance() -> Dictionary:
 	ShipData.add_module(bp, "barrel", Vector3(-0.7, 2.35, -2.0), Vector3(0.6, 0.6, 3.2), 0, "laser")
 	ShipData.add_module(bp, "barrel", Vector3(0.7, 2.35, -2.0), Vector3(0.6, 0.6, 3.2), 0, "missile")
 	ShipData.auto_link(bp)
+	Interior.auto_connect(bp)
 	return bp
 
 
@@ -57,6 +59,8 @@ static func anvil() -> Dictionary:
 	for m in bp["modules"]:
 		if m["type"] == "barrel":
 			m["weapon"] = "kinetic"
+	bp["interior"] = {"next_id": 1, "entrances": [], "corridors": []}   # the Anvil rebuilds its own network
+	Interior.auto_connect(bp)
 	return bp
 
 

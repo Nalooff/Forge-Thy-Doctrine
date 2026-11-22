@@ -45,6 +45,7 @@ uniform float alpha_mul = 1.0;
 uniform float rim = 0.0;
 uniform float clip_y = 1.0e9;
 uniform float dim_y = -1.0e9;
+uniform float vcol = 0.0;
 varying vec3 wpos;
 void vertex() {
 	wpos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
@@ -53,7 +54,8 @@ void fragment() {
 	if (wpos.y > clip_y) {
 		discard;
 	}
-	vec3 c = FRONT_FACING ? col.rgb : back_col.rgb;
+	vec3 fc = vcol > 0.5 ? COLOR.rgb : col.rgb;
+	vec3 c = FRONT_FACING ? fc : back_col.rgb;
 	float a = (FRONT_FACING ? col.a : back_col.a) * alpha_mul;
 	float k = 1.0;
 	if (wpos.y < dim_y) {
@@ -62,7 +64,7 @@ void fragment() {
 	}
 	float f = pow(1.0 - clamp(abs(dot(normalize(NORMAL), normalize(VIEW))), 0.0, 1.0), 2.0);
 	ALBEDO = c * k;
-	EMISSION = c * emit * k + col.rgb * f * rim;
+	EMISSION = c * emit * k + fc * f * rim;
 	ALPHA = clamp(a + f * rim * 0.45, 0.0, 1.0);
 	ROUGHNESS = 0.7;
 }
@@ -122,6 +124,13 @@ var deck_lines: ImmediateMesh
 var com_mi: MeshInstance3D
 var fwd_mi: MeshInstance3D
 var heat_mi: MeshInstance3D
+var cor_mi: MeshInstance3D
+var cor_mat: ShaderMaterial
+var corr := [false, false, true, false]   # show the corridors in this view
+var _cor_hl := Vector2i(-2, -2)
+var extra_btns: Array = []                # buttons only shown in the expanded panel
+var btn_corr_basic: Button
+var btn_corr_onion: Button
 
 # camera
 var yaw := 0.7
@@ -139,7 +148,7 @@ var _inside := false
 # view state
 var hull_mode := 0
 var show_com := true
-var labels := [false, true, true, true]
+var labels := [false, true, false, true]
 var spread := 1.0
 var spread_cur := 0.0
 var show_lines := true
@@ -388,6 +397,17 @@ func bind(s: Ship) -> void:
 		by_item[int(m["id"])] = it
 		node.position = m["pos"]
 		hull_box = hull_box.merge(AABB((m["pos"] as Vector3) - sz * 0.5, sz))
+	cor_mi = MeshInstance3D.new()
+	cor_mat = ShaderMaterial.new()
+	cor_mat.shader = _skin_shader(true)
+	cor_mat.set_shader_parameter("vcol", 1.0)
+	cor_mat.set_shader_parameter("emit", 0.35)
+	cor_mat.set_shader_parameter("rim", 0.2)
+	cor_mat.render_priority = 0
+	cor_mi.material_override = cor_mat
+	cor_mi.mesh = Interior.build_mesh(s.bp)
+	_cor_hl = Vector2i(-1, -1)
+	world.add_child(cor_mi)
 	_layout_explode()
 	# dynamic overlays
 	ov_lines = _dyn_mesh(true, 5)
@@ -793,6 +813,10 @@ func _apply_view() -> void:
 		com_mi.visible = show_com and view != EXPLODED
 		fwd_mi.visible = view != EXPLODED
 		heat_mi.visible = view == SYSTEMS and sys_mode == 2
+	if cor_mi != null:
+		cor_mi.visible = corr[view] and (view == BASIC or view == ONION)
+	for b in extra_btns:
+		(b as Control).visible = expanded
 	for sc in sections:
 		(sc["skin"] as MeshInstance3D).visible = hull_mode <= 1
 		(sc["wire"] as MeshInstance3D).visible = hull_mode != 3
@@ -861,6 +885,17 @@ func refresh() -> void:
 		wm2.set_shader_parameter("ghost", ghost)
 		(it["fill"] as MeshInstance3D).visible = not above
 		(it["wire"] as MeshInstance3D).visible = (not above) or (view == ONION and ghost_above)
+	if cor_mat != null:
+		cor_mat.set_shader_parameter("clip_y", cy)
+		cor_mat.set_shader_parameter("dim_y", dy)
+		var hl := Vector2i(-1, -1)
+		if _is(hover, "corridor", "id", int(hover.get("id", -1))):
+			hl = Vector2i(int(hover["id"]), int(hover["seg"]))
+		elif _is(selected, "corridor", "id", int(selected.get("id", -1))):
+			hl = Vector2i(int(selected["id"]), int(selected["seg"]))
+		if hl != _cor_hl:
+			_cor_hl = hl
+			cor_mi.mesh = Interior.build_mesh(ship.bp, hl.x, hl.y)
 	if _cut_dirty:
 		_rebuild_cut()
 	_rebuild_overlay()
@@ -1033,6 +1068,14 @@ func pick_at(p: Vector2) -> Dictionary:
 		if t < best_mt:
 			best_mt = t
 			best_id = int(it["id"])
+	var best_cor := {}
+	if cor_mi != null and cor_mi.visible:
+		var ch := Interior.pick_ray(ship.bp, o, d)
+		if not ch.is_empty() and (ch["pos"] as Vector3).y <= cy:
+			best_cor = {"kind": "corridor", "id": int(ch["cor"]), "seg": int(ch["seg"]), "t": float(ch["t"]), "y": (ch["pos"] as Vector3).y}
+			if float(ch["dist"]) < best_mt:
+				best_mt = float(ch["dist"])
+				best_id = -2
 	var best_hull := {}
 	var best_ht := INF
 	if hull_mode <= 2:
@@ -1053,6 +1096,8 @@ func pick_at(p: Vector2) -> Dictionary:
 					best_ht = t2
 					var nrm: Vector3 = -((tr[1] as Vector3) - (tr[0] as Vector3)).cross((tr[2] as Vector3) - (tr[0] as Vector3))
 					best_hull = {"kind": "hull", "sec": int(sc["i"]), "tri": ti, "face": _face_name(nrm), "y": gh.y}
+	if best_id == -2 and not (hull_mode == 1 and best_ht < best_mt):
+		return best_cor
 	if best_id >= 0 and not (hull_mode == 1 and best_ht < best_mt):
 		return {"kind": "module", "id": best_id}
 	return best_hull
@@ -1085,6 +1130,31 @@ func info_lines(h: Dictionary, max_lines := 99) -> Array:
 	var out: Array = []
 	if ship == null or h.is_empty():
 		return out
+	if String(h["kind"]) == "corridor":
+		var c := Interior.corridor(ship.bp, int(h["id"]))
+		if c.is_empty():
+			return out
+		var poly := Interior.polyline(ship.bp, c)
+		var sg := clampi(int(h["seg"]), 0, maxi(poly.size() - 2, 0))
+		var kind := Interior.seg_kind(poly[sg], poly[sg + 1])
+		var inf := Interior.info(ship.bp, c)
+		out.append(_ln("CORRIDOR #%d   segment %d of %d" % [int(c["id"]), sg + 1, int(inf["segments"])], AMBER))
+		out.append(_ln("%s   %.0f deg   %.1f m" % [String(Interior.KIND_NAMES[kind]).to_upper(), Interior.seg_angle(poly[sg], poly[sg + 1]), poly[sg].distance_to(poly[sg + 1])], Interior.KIND_COLORS[kind]))
+		var wf := float((c["w"] as Array)[sg]) if sg < (c["w"] as Array).size() else 1.0
+		out.append(_ln("Width %.1f m (x%.1f)%s" % [Interior.seg_width(ship.bp, c, sg), wf, "   ROOM" if wf >= 2.0 else ""]))
+		var nd := 0
+		for dd in c["doors"]:
+			if int(dd[0]) == sg:
+				nd += 1
+		out.append(_ln("Doors on this segment: %d" % nd, GREY))
+		var ea := Interior.entrance(ship.bp, int(c["a"]))
+		var eb := Interior.entrance(ship.bp, int(c["b"]))
+		if not ea.is_empty() and not eb.is_empty() and ship.by_id.has(int(ea["module"])) and ship.by_id.has(int(eb["module"])):
+			out.append(_ln("%s #%d  ->  %s #%d" % [ABBR.get(String((ship.by_id[int(ea["module"])] as Dictionary)["type"]), "?"), int(ea["module"]), ABBR.get(String((ship.by_id[int(eb["module"])] as Dictionary)["type"]), "?"), int(eb["module"])], GREY))
+		var kk: Array = inf["kinds"]
+		out.append(_ln("Whole corridor %.1f m: %d flat, %d slope, %d stairs, %d ladder" % [float(inf["length"]), kk[0], kk[1], kk[2], kk[3]], GREY))
+		out.append(_ln("Deck %d of %d" % [deck_of_y(float(h["y"])) + 1, layers], GREY))
+		return out.slice(0, max_lines)
 	if String(h["kind"]) == "module":
 		var id := int(h["id"])
 		if not ship.by_id.has(id):
@@ -1345,6 +1415,7 @@ func _build_controls() -> void:
 	var b0: HBoxContainer = bars[BASIC]
 	_btn("CoM", b0, func(on: bool): show_com = on; _apply_view(), true, true)
 	_btn("Labels", b0, func(on: bool): labels[BASIC] = on; layer2d.queue_redraw(), true, labels[BASIC])
+	btn_corr_basic = _btn("Corr", b0, func(on: bool): corr[BASIC] = on; _apply_view(); refresh(), true, corr[BASIC])
 	# Exploded: spread slider, leader lines, labels
 	var b1: HBoxContainer = bars[EXPLODED]
 	var sl := Label.new()
@@ -1371,8 +1442,9 @@ func _build_controls() -> void:
 	b2.add_child(decks_label)
 	_btn("-", b2, func(): set_layers(layers - 1))
 	_btn("+", b2, func(): set_layers(layers + 1))
-	_btn("Ghost", b2, func(on: bool): ghost_above = on; _cut_dirty = true; refresh(), true, true)
-	_btn("Labels", b2, func(on: bool): labels[ONION] = on; layer2d.queue_redraw(), true, labels[ONION])
+	btn_corr_onion = _btn("Corr", b2, func(on: bool): corr[ONION] = on; _apply_view(); refresh(), true, corr[ONION])
+	extra_btns.append(_btn("Ghost", b2, func(on: bool): ghost_above = on; _cut_dirty = true; refresh(), true, true))
+	extra_btns.append(_btn("Tags", b2, func(on: bool): labels[ONION] = on; layer2d.queue_redraw(), true, false))
 	# Systems: links / power, labels
 	var b3: HBoxContainer = bars[SYSTEMS]
 	var grp := ButtonGroup.new()
@@ -1432,6 +1504,7 @@ func _build_controls() -> void:
 func _toggle_expand() -> void:
 	expanded = not expanded
 	btn_expand.text = "Shrink" if expanded else "Expand"
+	_apply_view()
 	expand_requested.emit(expanded)
 
 

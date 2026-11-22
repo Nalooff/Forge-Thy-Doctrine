@@ -81,6 +81,7 @@ static func new_blueprint(ship_name: String) -> Dictionary:
 		"color": [0.55, 0.58, 0.65], "accent": [0.25, 0.6, 0.95],
 		"rings": [make_ring(-9, 1.6, 1.2), make_ring(-5, 2.6, 1.9), make_ring(4, 3.0, 2.0), make_ring(9, 2.2, 1.6)],
 		"modules": [], "links": [], "next_id": 1,
+		"interior": {"next_id": 1, "entrances": [], "corridors": []},
 	}
 
 
@@ -96,6 +97,8 @@ static func normalize(bp: Dictionary) -> Dictionary:
 	for l in bp.get("links", []):
 		links.append([int(l[0]), int(l[1])])
 	bp["links"] = links
+	Interior.normalize(bp)
+	Interior.prune(bp)
 	return bp
 
 
@@ -127,6 +130,7 @@ static func remove_module(bp: Dictionary, id: int) -> void:
 		if l[0] != id and l[1] != id:
 			keep.append(l)
 	bp["links"] = keep
+	Interior.on_module_removed(bp, id)
 
 
 static func link_allowed(ta: String, tb: String) -> bool:
@@ -231,6 +235,7 @@ static func scale_ship(bp: Dictionary, s: float, scale_modules := false) -> void
 		m["pos"] = a3(v3(m["pos"]) * s)
 		if scale_modules:
 			m["size"] = a3(v3(m["size"]) * s)
+	Interior.scale(bp, s)
 
 
 static func mirrored_copy(bp: Dictionary, id: int) -> int:
@@ -535,7 +540,7 @@ static func compute_stats(bp: Dictionary) -> Dictionary:
 		"thrust": thrust, "thrust_best": best, "rcs": best * RCS_FRACTION,
 		"accel_fwd": float(thrust[0]) / maxf(mass, 0.001),
 		"gyro": clampf(GYRO_K / maxf(mass, 0.001), 0.25, 3.0),
-		"tris": tris.size() + bp["modules"].size() * 12, "tri_budget": TRI_BUDGET[tier - 1],
+		"tris": tris.size() + bp["modules"].size() * 12 + Interior.tri_count(bp), "tri_budget": TRI_BUDGET[tier - 1],
 	}
 
 
@@ -661,4 +666,5 @@ static func validate(bp: Dictionary, ctx := {}) -> Array:
 		issues.append({"msg": "Class %s is not allowed on the selected map" % st["class"], "mod": -1})
 	if ctx.has("budget") and float(st["cost"]) > float(ctx["budget"]):
 		issues.append({"msg": "Costs %.0f pts, team budget is %.0f" % [st["cost"], ctx["budget"]], "mod": -1})
+	issues.append_array(Interior.issues(bp))
 	return issues

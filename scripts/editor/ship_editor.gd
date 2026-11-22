@@ -15,7 +15,7 @@ const MODES := {
 	"Hull": {"Type": ["Vertex", "Ring"], "Modifier": ["Mirror", "Soft select", "Thickness"], "Helper": HELPERS},
 	"Modules": {"Type": ["Module"], "Modifier": ["Auto-hull"], "Helper": HELPERS},
 	"Links": {"Type": ["Link"], "Modifier": ["Auto-link"], "Helper": HELPERS},
-	"Interior": {"Type": ["Corridor"], "Modifier": ["None"], "Helper": HELPERS},
+	"Interior": {"Type": ["Entrance", "Corridor"], "Modifier": ["Bend points", "Width", "Doors"], "Helper": HELPERS},
 	"Cosmetics": {"Type": ["Paint"], "Modifier": ["None"], "Helper": HELPERS},
 	"Test": {"Type": ["Test range"], "Modifier": ["None"], "Helper": HELPERS},
 }
@@ -27,6 +27,12 @@ var sel_ring := 1
 var sel_vert := -1          # -1 = whole ring
 var sel_mod := -1
 var link_from := -1
+var sel_ent := -1           # Interior: selected entrance / corridor / bend point / segment, first entrance of a new corridor
+var sel_cor := -1
+var sel_bend := -1
+var sel_seg := -1
+var cor_from := -1
+var cor_root: Node3D
 var mirror := true
 var soft := false
 var ring_mode := false
@@ -107,6 +113,11 @@ func _after_load() -> void:
 	sel_vert = -1
 	sel_mod = -1
 	link_from = -1
+	sel_ent = -1
+	sel_cor = -1
+	sel_bend = -1
+	sel_seg = -1
+	cor_from = -1
 	name_edit.text = bp["name"]
 	_frame_camera()
 	_set_step(step)
@@ -140,6 +151,8 @@ func _build_world() -> void:
 	add_child(handle_root)
 	mod_root = Node3D.new()
 	add_child(mod_root)
+	cor_root = Node3D.new()
+	add_child(cor_root)
 	line_mesh = ImmediateMesh.new()
 	line_mi = MeshInstance3D.new()
 	line_mi.mesh = line_mesh
@@ -646,13 +659,18 @@ func _pick_mode(t: String, i: int) -> void:
 func _set_step(s: String) -> void:
 	step = s
 	link_from = -1
+	cor_from = -1
+	sel_ent = -1
+	sel_cor = -1
+	sel_bend = -1
+	sel_seg = -1
 	tl.set_active(s)
 	_sync_modes()
 	var hints := {
 		"Hull": "LMB on a vertex: select/drag (mirror keeps symmetry). Arrows = X/Y, PageUp/PageDown = ring Z. RMB orbit, MMB/Shift+RMB pan, wheel zoom. Ctrl+Z undo.",
 		"Modules": "LMB a module to select and drag it (camera plane). Arrows/PageUp/PageDown nudge. Red outline = minimum size. White line = facing.",
 		"Links": "LMB module A, then module B to link: Commander Post -> Engine/Turret Control/Turret Bay/Radar, Engine -> Thruster, Turret Bay -> touching Barrel (turns it), Turret Control -> any Barrel (fixed).",
-		"Interior": "Corridors, doors, stairs and ladders belong to roadmap step 6 and are not in this prototype.",
+		"Interior": "Entrance: click a module face.  Corridor: click entrance A, then B.  Click a corridor to use the Modifier (bend points / width / doors).  Del removes.",
 		"Cosmetics": "Colors only in this prototype. Stowage props and decals: later roadmap.",
 		"Test": "Launch the solo test range: place a dummy, shoot your own hull, test flight.",
 	}
@@ -681,7 +699,7 @@ func _build_tools() -> void:
 				"Links":
 					_tools_links()
 				"Interior":
-					_lbl("Not in this prototype.\n\nPlanned: entrances on internal modules,\ncorridors with bend points, doors,\nauto slope -> stairs -> ladder.", tools)
+					_tools_interior()
 				"Cosmetics":
 					_tools_cosmetics()
 				"Test":
@@ -726,6 +744,13 @@ func _tools_modifier(v: String) -> void:
 			_lbl("Thicker armor = tougher but heavier and\nmore expensive.", tools, 11)
 		"Auto-hull":
 			_tools_mod_autohull()
+		"Bend points":
+			_lbl("Click a corridor to add a bend point there.\nDrag a white point to move it, Delete removes\nthe selected point. Bends must stay inside the\nhull and clear of the modules.", tools, 11)
+			_btn("Re-route selected", tools, _reroute_selected)
+		"Width":
+			_lbl("Click a corridor segment to widen it:\nx1 -> x1.5 -> x2 -> x3 (a room) -> x1.\nA wide part must still fit in the hull.", tools, 11)
+		"Doors":
+			_lbl("Click a corridor to place a door.\nClick near an existing door to remove it.\nEvery new corridor starts with a door at\neach end.", tools, 11)
 		"Auto-link":
 			_btn("Auto-link everything", tools, func(): _push_undo(); ShipData.auto_link(bp); _changed(); _build_tools())
 			_btn("Clear all links", tools, func(): _push_undo(); bp["links"] = []; _changed(); _build_tools())
@@ -1217,6 +1242,7 @@ func _process(delta: float) -> void:
 
 func _rebuild() -> void:
 	_auto_snap()
+	Interior.prune(bp)
 	var rings: Array = bp["rings"]
 	hull_mi.mesh = ShipData.build_hull_mesh(rings)
 	var c := ShipData.col(bp["color"])
@@ -1230,6 +1256,7 @@ func _rebuild() -> void:
 	issues = ShipData.validate(bp, {"max_tier": MAPS[map_idx]["tier"], "budget": budget})
 	_rebuild_handles()
 	_rebuild_modules()
+	_rebuild_interior()
 	_rebuild_lines()
 	_update_stats()
 	if mod_list != null and is_instance_valid(mod_list) and step == "Modules":
@@ -1275,7 +1302,7 @@ func _type_color(t: String) -> Color:
 func _rebuild_modules() -> void:
 	for c in mod_root.get_children():
 		c.queue_free()
-	if step == "Hull" or step == "Cosmetics" or step == "Interior":
+	if step == "Hull" or step == "Cosmetics":
 		return
 	var bad := {}
 	for i in issues:
@@ -1292,6 +1319,8 @@ func _rebuild_modules() -> void:
 		if bad.has(int(m["id"])):
 			col = col.lerp(Color(1, 0.1, 0.1), 0.6)
 		col.a = 0.75 if int(m["id"]) == sel_mod or int(m["id"]) == link_from else 0.5
+		if step == "Interior":
+			col.a = 0.22
 		mat.albedo_color = col
 		mi.material_override = mat
 		mi.position = ShipData.v3(m["pos"])
@@ -1348,6 +1377,9 @@ func _rebuild_lines() -> void:
 	_line(Vector3.ZERO, Vector3(L * 0.15, 0, 0), Color.RED)
 	_line(Vector3.ZERO, Vector3(0, L * 0.15, 0), Color.GREEN)
 	_line(Vector3.ZERO, Vector3(0, 0, -L * 0.15), Color(0.4, 0.5, 1.0))
+	if step == "Interior":
+		for m in bp["modules"]:
+			_box_lines(ShipData.v3(m["pos"]), ShipData.v3(m["size"]), _type_color(m["type"]).lightened(0.2))
 	if step in ["Modules", "Links"]:
 		for m in bp["modules"]:
 			var p := ShipData.v3(m["pos"])
@@ -1381,6 +1413,9 @@ func _update_stats() -> void:
 	t += "Accel fwd %.1f m/s2   RCS %.0f kN   gyro %.2f rad/s2\n" % [st["accel_fwd"], st["rcs"], st["gyro"]]
 	var hh := float(st["heat_hard"])
 	t += "Heat  idle %d%%   hard use [color=%s]%d%%[/color] of critical\n" % [int(st["heat_idle"]), "#6f6" if hh < 70.0 else ("#fb4" if hh < 100.0 else "#f66"), int(hh)]
+	var ist := Interior.stats(bp)
+	if int(ist["count"]) > 0:
+		t += "Interior  %d corridors, %.0f m, %d doors, %d stairs, %d ladders\n" % [ist["count"], ist["length"], ist["doors"], ist["stairs"], ist["ladders"]]
 	var tri_ok := int(st["tris"]) <= int(st["tri_budget"])
 	t += "Polys [color=%s]%d / %d[/color]\n" % ["#6f6" if tri_ok else "#f66", st["tris"], st["tri_budget"]]
 	if not ok:
@@ -1389,6 +1424,323 @@ func _update_stats() -> void:
 	legal_lbl.text = "LEGAL - playable, can be saved" if ok else "NOT LEGAL (%d issue%s)" % [issues.size(), "" if issues.size() == 1 else "s"]
 	legal_lbl.add_theme_color_override("font_color", Color(0.4, 1.0, 0.45) if ok else Color(1.0, 0.4, 0.35))
 	stats_lbl.text = t
+
+
+
+# ------------------------------------------------------------------ interior (corridors)
+func _ent_label(id: int) -> String:
+	var e := Interior.entrance(bp, id)
+	if e.is_empty():
+		return "?"
+	var m := ShipData.get_module(bp, int(e["module"]))
+	if m.is_empty():
+		return "?"
+	return "%s %d" % [ShipPreview.ABBR.get(String(m["type"]), "?"), int(m["id"])]
+
+
+func _cor_label(c: Dictionary) -> String:
+	return "#%d  %s > %s   %.0f m" % [int(c["id"]), _ent_label(int(c["a"])), _ent_label(int(c["b"])), Interior.length(bp, c)]
+
+
+func _tools_interior() -> void:
+	var st := Interior.stats(bp)
+	_lbl("Corridor width %.2f m\n%d entrance(s), %d corridor(s), %.0f m\n%d stairs, %d ladders, %d doors" % [Interior.base_width(bp), st["entrances"], st["count"], st["length"], st["stairs"], st["ladders"], st["doors"]], tools, 12)
+	_btn("Auto-connect all", tools, func():
+		_push_undo()
+		var n := Interior.auto_connect(bp)
+		say("Made %d corridor(s)." % n)
+		_changed()
+		_build_tools())
+	_btn("Clear interior", tools, func():
+		_push_undo()
+		bp["interior"] = {"next_id": 1, "entrances": [], "corridors": []}
+		sel_ent = -1
+		sel_cor = -1
+		sel_bend = -1
+		_changed()
+		_build_tools())
+	if sel_ent >= 0 and not Interior.entrance(bp, sel_ent).is_empty():
+		_lbl("Selected entrance: %s" % _ent_label(sel_ent), tools, 12)
+		_btn("Delete entrance", tools, _delete_interior)
+	if sel_cor >= 0 and not Interior.corridor(bp, sel_cor).is_empty():
+		var c := Interior.corridor(bp, sel_cor)
+		var inf := Interior.info(bp, c)
+		var k: Array = inf["kinds"]
+		_lbl("Selected: %s\n%d segment(s), %d bend(s), %d door(s), widest x%.1f\n%d flat, %d slope, %d stairs, %d ladder" % [_cor_label(c), inf["segments"], inf["bends"], inf["doors"], inf["widest"], k[0], k[1], k[2], k[3]], tools, 11)
+		_btn("Re-route (automatic)", tools, _reroute_selected)
+		_btn("Delete corridor", tools, _delete_interior)
+	if not Interior.corridors(bp).is_empty():
+		_lbl("Corridors (click to select):", tools, 12)
+		for c2 in Interior.corridors(bp):
+			var cid := int(c2["id"])
+			_btn(_cor_label(c2), tools, func(): sel_cor = cid; sel_ent = -1; sel_bend = -1; sel_seg = -1; _build_tools(); _changed(false))
+
+
+func _reroute_selected() -> void:
+	var c := Interior.corridor(bp, sel_cor)
+	if c.is_empty():
+		say("Select a corridor first.")
+		return
+	_push_undo()
+	var r := Interior.reroute(bp, c)
+	say("Re-routed." if bool(r["ok"]) else String(r["msg"]))
+	sel_bend = -1
+	_changed()
+	_build_tools()
+
+
+func _delete_interior() -> void:
+	if sel_cor >= 0 and sel_bend >= 0:
+		var c := Interior.corridor(bp, sel_cor)
+		if not c.is_empty():
+			_push_undo()
+			Interior.remove_bend(bp, c, sel_bend)
+			sel_bend = -1
+	elif sel_cor >= 0:
+		_push_undo()
+		Interior.remove_corridor(bp, sel_cor)
+		sel_cor = -1
+	elif sel_ent >= 0:
+		_push_undo()
+		Interior.remove_entrance(bp, sel_ent)
+		sel_ent = -1
+	else:
+		return
+	_changed()
+	_build_tools()
+
+
+func _bend_pos(cid: int, k: int) -> Vector3:
+	var c := Interior.corridor(bp, cid)
+	if c.is_empty() or k < 0 or k >= (c["pts"] as Array).size():
+		return Vector3.ZERO
+	return ShipData.v3(c["pts"][k])
+
+
+## Move a bend point; refused (nothing changes) if the corridor would leave the hull or cut through a module.
+func _move_bend(cid: int, k: int, np: Vector3) -> bool:
+	var c := Interior.corridor(bp, cid)
+	if c.is_empty() or k < 0 or k >= (c["pts"] as Array).size():
+		return false
+	var old: Array = c["pts"][k]
+	if ShipData.v3(old) == np:
+		return false
+	c["pts"][k] = ShipData.a3(np)
+	if Interior.polyline_problem(bp, c) != "":
+		c["pts"][k] = old
+		return false
+	_changed()
+	return true
+
+
+func _rebuild_interior() -> void:
+	for ch in cor_root.get_children():
+		ch.queue_free()
+	if step != "Interior":
+		return
+	var mi := MeshInstance3D.new()
+	mi.mesh = Interior.build_mesh(bp, sel_cor, sel_seg)
+	var mat := StandardMaterial3D.new()
+	mat.vertex_color_use_as_albedo = true
+	mat.roughness = 0.6
+	mi.material_override = mat
+	cor_root.add_child(mi)
+	var hs := Interior.base_width(bp) * 0.28
+	var sm := SphereMesh.new()
+	sm.radius = hs
+	sm.height = hs * 2.0
+	sm.radial_segments = 10
+	sm.rings = 5
+	for e in Interior.entrances(bp):
+		var eid := int(e["id"])
+		var col := Color(0.3, 1.0, 0.45) if Interior.entrance_used(bp, eid) else Color(1.0, 0.65, 0.2)
+		if eid == sel_ent:
+			col = Color(1.0, 1.0, 0.2)
+		elif eid == cor_from:
+			col = Color(0.3, 0.9, 1.0)
+		cor_root.add_child(_marker(sm, Interior.entrance_pos(bp, e), col, 1.0))
+	for c in Interior.corridors(bp):
+		var cid := int(c["id"])
+		var pts: Array = c["pts"]
+		for k in range(pts.size()):
+			var col2 := Color(1.0, 1.0, 0.2) if (cid == sel_cor and k == sel_bend) else Color(0.95, 0.95, 1.0)
+			cor_root.add_child(_marker(sm, ShipData.v3(pts[k]), col2, 0.8))
+
+
+func _marker(mesh: Mesh, pos: Vector3, col: Color, sc: float) -> MeshInstance3D:
+	var m := MeshInstance3D.new()
+	m.mesh = mesh
+	m.position = pos
+	m.scale = Vector3(sc, sc, sc)
+	var mt := StandardMaterial3D.new()
+	mt.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mt.no_depth_test = true
+	mt.albedo_color = col
+	m.material_override = mt
+	return m
+
+
+func _pick_entrance() -> int:
+	var mp := get_viewport().get_mouse_position()
+	var best := -1
+	var bd := 16.0
+	for e in Interior.entrances(bp):
+		var wp := Interior.entrance_pos(bp, e)
+		if cam.is_position_behind(wp):
+			continue
+		var d := cam.unproject_position(wp).distance_to(mp)
+		if d < bd:
+			bd = d
+			best = int(e["id"])
+	return best
+
+
+func _pick_bend() -> Vector2i:
+	var mp := get_viewport().get_mouse_position()
+	var best := Vector2i(-1, -1)
+	var bd := 14.0
+	for c in Interior.corridors(bp):
+		var pts: Array = c["pts"]
+		for k in range(pts.size()):
+			var wp := ShipData.v3(pts[k])
+			if cam.is_position_behind(wp):
+				continue
+			var d := cam.unproject_position(wp).distance_to(mp)
+			if d < bd:
+				bd = d
+				best = Vector2i(int(c["id"]), k)
+	return best
+
+
+## Nearest module under the mouse: {id, dist, pos} or {}.
+func _module_hit() -> Dictionary:
+	var rr := _ray()
+	var best := {}
+	var bd := INF
+	for m in bp["modules"]:
+		var h = ShipData.module_box(m).intersects_ray(rr[0], rr[1])
+		if h != null:
+			var d: float = (rr[0] as Vector3).distance_to(h)
+			if d < bd:
+				bd = d
+				best = {"id": int(m["id"]), "dist": d, "pos": h}
+	return best
+
+
+func _click_interior() -> void:
+	var tv := _mode_value("Type")
+	var mv := _mode_value("Modifier")
+	# 1. a bend point: select it and drag it
+	var hb := _pick_bend()
+	if hb.x >= 0:
+		sel_cor = hb.x
+		sel_bend = hb.y
+		sel_ent = -1
+		sel_seg = -1
+		_push_undo()
+		var hit = _drag_hit()
+		if hit != null:
+			dragging = true
+			drag_start = hit
+			drag_orig = _bend_pos(sel_cor, sel_bend)
+		_build_tools()
+		_changed(false)
+		return
+	# 2. an entrance: select it, or start / finish a corridor
+	var ent := _pick_entrance()
+	if ent >= 0:
+		sel_bend = -1
+		if tv == "Corridor":
+			if cor_from < 0:
+				cor_from = ent
+				say("Entrance %s - now click the other entrance." % _ent_label(ent))
+			elif ent != cor_from:
+				_push_undo()
+				var r := Interior.add_corridor(bp, cor_from, ent)
+				if bool(r["ok"]):
+					sel_cor = int(r["id"])
+					sel_ent = -1
+					say("Corridor made.")
+				else:
+					undo_stack.pop_back()
+					say(String(r["msg"]))
+				cor_from = -1
+			else:
+				cor_from = -1
+		else:
+			sel_ent = ent
+			sel_cor = -1
+		_build_tools()
+		_changed(false)
+		return
+	# 3. a corridor: the Modifier decides what a click does
+	var rr := _ray()
+	var ch := Interior.pick_ray(bp, rr[0], rr[1])
+	var mh := _module_hit()
+	if not ch.is_empty() and (mh.is_empty() or float(ch["dist"]) < float(mh["dist"])):
+		var c := Interior.corridor(bp, int(ch["cor"]))
+		var seg := int(ch["seg"])
+		sel_cor = int(c["id"])
+		sel_ent = -1
+		sel_seg = seg
+		sel_bend = -1
+		var backup := c.duplicate(true)
+		_push_undo()
+		match mv:
+			"Bend points":
+				var pos := ch["pos"] as Vector3
+				var snapped_pos := Vector3(_snapv(pos.x), _snapv(pos.y), _snapv(pos.z))
+				var k := Interior.insert_bend(bp, c, seg, snapped_pos)
+				if Interior.polyline_problem(bp, c) != "":
+					for key in backup:
+						c[key] = backup[key]
+					k = Interior.insert_bend(bp, c, seg, pos)
+				if Interior.polyline_problem(bp, c) != "":
+					for key in backup:
+						c[key] = backup[key]
+					undo_stack.pop_back()
+					say("A bend point there would leave the hull or cut a module.")
+				else:
+					sel_bend = k
+					say("Bend point added - drag it, or press Delete to remove it.")
+			"Width":
+				var f := Interior.cycle_width(c, seg)
+				if Interior.polyline_problem(bp, c) != "":
+					for key in backup:
+						c[key] = backup[key]
+					undo_stack.pop_back()
+					say("That part is too wide for the hull there.")
+				else:
+					say("Segment width x%.1f%s" % [f, "  (room)" if f >= 2.0 else ""])
+			"Doors":
+				say("Door added." if Interior.toggle_door(c, seg, float(ch["t"])) else "Door removed.")
+		_build_tools()
+		_changed()
+		return
+	# 4. a module face: a new entrance
+	if tv == "Entrance" and not mh.is_empty():
+		var m := ShipData.get_module(bp, int(mh["id"]))
+		var fa := Interior.face_at(m, mh["pos"])
+		_push_undo()
+		var r2 := Interior.add_entrance(bp, int(m["id"]), int(fa["face"]), float(fa["u"]), float(fa["v"]))
+		if bool(r2["ok"]):
+			sel_ent = int(r2["id"])
+			sel_cor = -1
+			say("Entrance placed.")
+		else:
+			undo_stack.pop_back()
+			say(String(r2["msg"]))
+		_build_tools()
+		_changed()
+		return
+	# nothing: clear the selection
+	sel_ent = -1
+	sel_cor = -1
+	sel_bend = -1
+	sel_seg = -1
+	cor_from = -1
+	_build_tools()
+	_changed(false)
 
 
 # ------------------------------------------------------------------ input
@@ -1437,6 +1789,11 @@ func _drag_hit() -> Variant:
 			return null
 		var plane := Plane(Vector3(0, 0, 1), float(_ring(sel_ring)["z"]))
 		return plane.intersects_ray(o, d)
+	if step == "Interior":
+		if sel_cor < 0 or sel_bend < 0:
+			return null
+		var fwd0 := -cam.global_transform.basis.z
+		return Plane(fwd0, _bend_pos(sel_cor, sel_bend).dot(fwd0)).intersects_ray(o, d)
 	var m := ShipData.get_module(bp, sel_mod)
 	if m.is_empty():
 		return null
@@ -1495,6 +1852,8 @@ func _do_drag() -> void:
 		else:
 			_move_ring_by(sel_ring, dx, dy)
 		_changed()
+	elif step == "Interior" and sel_cor >= 0 and sel_bend >= 0:
+		_move_bend(sel_cor, sel_bend, Vector3(_snapv(drag_orig.x + h.x - drag_start.x), _snapv(drag_orig.y + h.y - drag_start.y), _snapv(drag_orig.z + h.z - drag_start.z)))
 	elif step == "Modules" and sel_mod >= 0:
 		var m := ShipData.get_module(bp, sel_mod)
 		var np := Vector3(_snapv(drag_orig.x + h.x - drag_start.x), _snapv(drag_orig.y + h.y - drag_start.y), _snapv(drag_orig.z + h.z - drag_start.z))
@@ -1560,6 +1919,8 @@ func _click() -> void:
 					drag_orig = ShipData.v3(m["pos"])
 				_build_tools()
 				_changed(false)
+		"Interior":
+			_click_interior()
 		"Links":
 			var id2 := _pick_module()
 			if id2 < 0:
@@ -1598,6 +1959,8 @@ func _nudge(k: InputEvent) -> void:
 		KEY_DELETE:
 			if step == "Modules":
 				_delete_module()
+			elif step == "Interior":
+				_delete_interior()
 			return
 		_:
 			return
@@ -1618,4 +1981,6 @@ func _nudge(k: InputEvent) -> void:
 		var m := ShipData.get_module(bp, sel_mod)
 		m["pos"] = ShipData.a3(ShipData.v3(m["pos"]) + d)
 		_changed()
+	elif step == "Interior" and sel_cor >= 0 and sel_bend >= 0:
+		_move_bend(sel_cor, sel_bend, _bend_pos(sel_cor, sel_bend) + d)
 	get_viewport().set_input_as_handled()

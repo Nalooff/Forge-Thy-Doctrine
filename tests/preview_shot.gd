@@ -15,18 +15,9 @@ func _initialize() -> void:
 	var hud = ar.hud
 	var pv = hud.preview
 	var shots := [
-		["basic", 0, false, {"kind": "mod", "type": "generator"}],
-		["basic_hull", 0, false, {"kind": "hull"}],
-		["exploded", 1, false, {}],
-		["onion", 2, false, {"layer": 2}],
-		["links", 3, false, {}],
-		["power", 3, false, {"power": true}],
-		["heat", 3, false, {"heat": true}],
-		["basic_big", 0, true, {"kind": "mod", "type": "barrel"}],
-		["exploded_big", 1, true, {}],
-		["onion_big", 2, true, {"layer": 1}],
-		["links_big", 3, true, {}],
-		["heat_big", 3, true, {"heat": true}],
+		["corr_onion", 2, false, {"layer": 99, "cor": true}],
+		["corr_onion_big", 2, true, {"layer": 99, "cor": true}],
+		["corr_basic_big", 0, true, {"basic_corr": true, "cor": true}],
 	]
 	var cur_big := false
 	for sh in shots:
@@ -40,12 +31,17 @@ func _initialize() -> void:
 		var o: Dictionary = sh[3]
 		if o.has("layer"):
 			pv.set_layer(o["layer"])
+		pv.corr[0] = o.has("basic_corr")
+		pv._apply_view()
 		pv.sys_mode = 1 if o.has("power") else (2 if o.has("heat") else 0)
 		pv._apply_view()
 		pv.yaw = 0.7
 		pv.pitch = -0.35
 		for i in 45:
 			await process_frame
+		if o.has("cor"):
+			var cs: Array = Interior.corridors(ar.player.bp)
+			pv.selected = {"kind": "corridor", "id": int(cs[cs.size() - 1]["id"]), "seg": 2, "y": 0.0}
 		if o.get("kind", "") == "mod":
 			for m in ar.player.mods:
 				if m["type"] == o["type"]:
