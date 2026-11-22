@@ -19,6 +19,7 @@ Last audit: 2026-11-20, against `docs/Forge_Thy_Doctrine.md` and the code in `sc
 - Hidden systems: Electricity (priority by distance), RCS (10%), Gyro (inverse to mass), Radar
 - Flight (Newtonian, assisted/manual), commander and first-person views, free cursor, damage flash with 30 s shake lockout
 - Console HUD: panels 1-5 (module tabs, 3D radar, objectives/log), sub-panel 2
+- Heat (hidden system, `Ship._thermal_step`, constants `ShipData.HEAT_*`): every module turns 35% of the power it uses into heat (generators 12% of what they deliver), each with its own fixed thermal factor (0.75-1.25); modules conduct to the hull, the hull radiates into space (bigger hull = better cooling, ~75 s time constant). Above 80% a module loses output (thrust, fire rate, generator power, down to 40%), above 100% it burns (and the hull above 100%). Centre of heat = weighted average of module heat. UI: HEAT gauge (hottest module), one ticker + log warning per overheating module, module list tinted, heat lines in Power & Systems, Panel 1 Systems > Heat map (colours, % labels, centre-of-heat marker), hover card heat line + OVERHEATING status, editor Ship info line (heat idle / hard use). Test: `tests/heat_test.gd`
 - Panel 1 ship model (`scripts/arena/ship_preview.gd`): Basic 3D = glass hull with every module inside, hover or click (pin) any module or piece of hull for an info card (status, HP, power, thrust / weapon data, links, deck); Exploded = hull cut into sections that slide apart + every module pushed away so none overlap, spread slider, leader lines back to the real position, labels; Onion = ship cut into decks (2-16, -/+), pick a deck with the slider / Up / Dn / ALL, everything above is hidden (or ghosted), hull outline + module footprints drawn on the cut, layers below dimmed; Systems = command / engine / turret links or the power grid (green / amber / red) on the model; extras: hull Glass / Solid / Wire / Off, centre-of-mass marker, bow arrow, module labels, Expand button (Panel 1 grows into an inspector). Tests: `tests/preview_test.gd`, screenshots: `tests/preview_shot.gd`
 - Game modes vs bots: Team Deathmatch, Team Elimination, Deathmatch (Freematch)
 - Bots/autopilot, projectiles (kinetic, laser, missile), premade ships (Dart, Lance, Anvil), JSON ship saves
@@ -42,7 +43,7 @@ Last audit: 2026-11-20, against `docs/Forge_Thy_Doctrine.md` and the code in `sc
 - Interior step: entrances, corridors, doors, stairs, ladders, slopes
 - Cosmetics: stowage props, paint patterns/camo, decals/vinyl
 - Modules: Defense Bay, Communication Room, Communication Dish, Breach Doors, Breach Pods, Hangar
-- Hidden systems: Heat, Oxygen, Crew, AI cores, Communication (delay vs instant)
+- Hidden systems: Oxygen, Crew, AI cores, Communication (delay vs instant)
 - Multiplayer: host/join, server list and filters, GameLobby (player cards, ship selection, settings, objectives, chat, voice-to-text, objective links, spectator)
 - Modes: Zone Control, Base Defense
 - Maps: the 30+ maps and their effects (only one asteroid arena exists)

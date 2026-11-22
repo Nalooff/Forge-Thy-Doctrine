@@ -1379,6 +1379,8 @@ func _update_stats() -> void:
 	var pwr_ok := float(st["power_idle"]) <= float(st["power_out"])
 	t += "Power [color=%s]%.0f MW out, %.0f idle, %.0f peak[/color]\n" % ["#6f6" if pwr_ok else "#f66", st["power_out"], st["power_idle"], st["power_peak"]]
 	t += "Accel fwd %.1f m/s2   RCS %.0f kN   gyro %.2f rad/s2\n" % [st["accel_fwd"], st["rcs"], st["gyro"]]
+	var hh := float(st["heat_hard"])
+	t += "Heat  idle %d%%   hard use [color=%s]%d%%[/color] of critical\n" % [int(st["heat_idle"]), "#6f6" if hh < 70.0 else ("#fb4" if hh < 100.0 else "#f66"), int(hh)]
 	var tri_ok := int(st["tris"]) <= int(st["tri_budget"])
 	t += "Polys [color=%s]%d / %d[/color]\n" % ["#6f6" if tri_ok else "#f66", st["tris"], st["tri_budget"]]
 	if not ok:

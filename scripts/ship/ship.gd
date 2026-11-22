@@ -35,6 +35,13 @@ var power_demand := 0.0
 var power_frac := 1.0
 var caps := [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 var rcs_cap := 0.0
+var hull_temp := 0.0             # % of critical (see ShipData.HEAT_*)
+var heat_peak := 0.0             # hottest module, %
+var heat_hottest: Dictionary = {}
+var heat_centroid := Vector3.ZERO  # where the heat is building up (ship space), weighted by module heat content
+var _hull_cap := 1.0
+var _hull_rad := 1.0
+var _heat_t := 0.0
 var hull_mat: StandardMaterial3D
 var hull_mi: MeshInstance3D
 var is_player := false
@@ -100,6 +107,8 @@ func setup(blueprint: Dictionary, p_team: int) -> void:
 	add_to_group("ships")
 	hull_hp_max = maxf(float(stats["hull_hp"]), 1.0)
 	hull_hp = hull_hp_max
+	_hull_rad = maxf(ShipData.HEAT_RAD * float(stats["area"]), 0.001)
+	_hull_cap = maxf(ShipData.HEAT_HULL_CAP * float(stats["mass"]), 0.5)
 	for pts in ShipData.hull_convex_parts(bp["rings"]):
 		var cs := CollisionShape3D.new()
 		var sh := ConvexPolygonShape3D.new()
@@ -138,6 +147,8 @@ func _make_module(m: Dictionary) -> void:
 		"bay": -1, "ctrls": [], "mount": ShipData.DIRS[int(m["dir"])], "cur_pos": ShipData.v3(m["pos"]), "q": Quaternion.IDENTITY,
 		"barrels": [], "slew": 1.5, "limit": 75.0,
 		"tmode": "main", "tgt": null,
+		"heat": 0.0, "hfrac": 1.0, "hwaste": 0.0, "hfac": ShipData.thermal_factor(int(m["id"]), String(m["type"])),
+		"hcap": maxf(ShipData.HEAT_CAP_PER_M3 * float(ms["volume"]), 0.2), "hsurf": ShipData.module_surface(ShipData.v3(m["size"])),
 	}
 	if m["type"] == "thruster":
 		rm["engine"] = ShipData.thruster_engine(bp, int(m["id"]))
@@ -387,7 +398,7 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 	var gens: Array = []
 	for m in mods_of("generator"):
 		if module_online(m):
-			supply += float(m["ms"]["out"])
+			supply += float(m["ms"]["out"]) * float(m["hfrac"])
 			gens.append(m["pos"])
 	for m in mods:
 		var dmin := 0.0
@@ -417,6 +428,7 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 	for m in mods:
 		if float(m["demand"]) <= 0.0:
 			m["frac"] = 1.0 if module_online(m) else 0.0
+	_thermal_step(dt)
 
 	# ---- apply forces
 	var f_local := Vector3.ZERO
@@ -429,7 +441,7 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 		var total := 0.0
 		for m in mods:
 			if m["type"] == "thruster" and int(m["dir"]) == d and float(m["demand"]) > 0.0:
-				total += float(m["ms"]["thrust"]) * float(m["ef"]) * float(used[d]) * float(m["frac"])
+				total += float(m["ms"]["thrust"]) * float(m["ef"]) * float(used[d]) * float(m["frac"]) * float(m["hfrac"])
 				m["throttle"] = float(used[d]) * float(m["frac"])
 		total += absf(rcs_f[a]) * float(_virt_rcs["frac"])
 		f_local[a] = total * sgn
@@ -447,6 +459,64 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 				_damage_hull((imp - 40.0) * 0.6, null)
 				Fx.burst(get_parent(), state.get_contact_local_position(i) + state.transform.origin * 0.0, 1.5, Color(1, 0.8, 0.4), 0.3)
 				break
+
+
+## Heat: every module turns part of the power it uses into heat and conducts it to the hull, the hull radiates it
+## into space (bigger hull = better cooling). Hot modules lose output (thrust, fire rate, generator power), above
+## critical they burn. Switch things off or stop firing to cool down.
+func _thermal_step(dt: float) -> void:
+	if not alive:
+		return
+	var gens: Array = []
+	for m in mods:
+		if String(m["type"]) == "generator" and module_online(m):
+			gens.append(m)
+	var served := 0.0
+	for m in mods:
+		if float(m["demand"]) > 0.0:
+			served += float(m["demand"]) * float(m["frac"])
+	served += float(_virt_gyro["demand"]) * float(_virt_gyro["frac"]) + float(_virt_rcs["demand"]) * float(_virt_rcs["frac"])
+	var flow_sum := 0.0
+	var report := {"modules": []}
+	for m in mods:
+		var waste := 0.0
+		if bool(m["alive"]):
+			if String(m["type"]) == "generator":
+				waste = ShipData.GEN_WASTE * served / float(maxi(gens.size(), 1)) if module_online(m) else 0.0
+			else:
+				waste = float(m["demand"]) * float(m["frac"]) * ShipData.HEAT_WASTE
+			waste *= float(m["hfac"])
+		m["hwaste"] = waste
+		var flow := ShipData.HEAT_COND * float(m["hsurf"]) * (float(m["heat"]) - hull_temp)
+		flow_sum += flow
+		var t := clampf(float(m["heat"]) + (waste - flow) / float(m["hcap"]) * dt, 0.0, 300.0)
+		m["heat"] = t
+		m["hfrac"] = ShipData.heat_factor(t) if bool(m["alive"]) else 1.0
+		if bool(m["alive"]) and t > ShipData.HEAT_CRIT:
+			_hurt_module(m, float(m["max"]) * 0.006 * clampf((t - ShipData.HEAT_CRIT) / 20.0, 0.2, 3.0) * dt, report, null)
+	hull_temp = clampf(hull_temp + (flow_sum - _hull_rad * hull_temp) / _hull_cap * dt, 0.0, 300.0)
+	if hull_temp > ShipData.HEAT_CRIT:
+		_damage_hull(hull_hp_max * 0.002 * clampf((hull_temp - ShipData.HEAT_CRIT) / 20.0, 0.2, 3.0) * dt, null)
+	_heat_t -= dt
+	if _heat_t <= 0.0:
+		_heat_t = 0.2
+		_refresh_heat_summary()
+
+
+func _refresh_heat_summary() -> void:
+	var wsum := 0.0
+	var csum := Vector3.ZERO
+	heat_peak = 0.0
+	heat_hottest = {}
+	for m in mods:
+		var t := float(m["heat"])
+		if bool(m["alive"]) and t > heat_peak:
+			heat_peak = t
+			heat_hottest = m
+		var w := t * float(m["ms"]["volume"])
+		wsum += w
+		csum += (m["pos"] as Vector3) * w
+	heat_centroid = csum / wsum if wsum > 0.001 else Vector3(stats["com"])
 
 
 func _physics_process(delta: float) -> void:
@@ -585,7 +655,7 @@ func _update_barrels(delta: float) -> void:
 	for m in mods:
 		if m["type"] != "barrel":
 			continue
-		m["cool"] = maxf(0.0, float(m["cool"]) - delta * float(m["frac"]))
+		m["cool"] = maxf(0.0, float(m["cool"]) - delta * float(m["frac"]) * float(m["hfrac"]))
 		if not m["alive"] or not controlled or not _barrel_controlled(m):
 			continue
 		var aim: Vector3 = m["aim"]
@@ -742,7 +812,12 @@ func _die(attacker: Ship) -> void:
 ## Sandbox helper: restore every module and the hull.
 func revive() -> void:
 	hull_hp = hull_hp_max
+	hull_temp = 0.0
+	heat_peak = 0.0
 	for m in mods:
+		m["heat"] = 0.0
+		m["hfrac"] = 1.0
+		m["hwaste"] = 0.0
 		m["hp"] = m["max"]
 		m["alive"] = true
 		m["ammo"] = int((m["ws"] as Dictionary).get("ammo", -1)) if m["type"] == "barrel" else -1

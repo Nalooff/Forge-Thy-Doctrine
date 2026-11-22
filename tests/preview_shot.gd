@@ -21,10 +21,12 @@ func _initialize() -> void:
 		["onion", 2, false, {"layer": 2}],
 		["links", 3, false, {}],
 		["power", 3, false, {"power": true}],
+		["heat", 3, false, {"heat": true}],
 		["basic_big", 0, true, {"kind": "mod", "type": "barrel"}],
 		["exploded_big", 1, true, {}],
 		["onion_big", 2, true, {"layer": 1}],
 		["links_big", 3, true, {}],
+		["heat_big", 3, true, {"heat": true}],
 	]
 	var cur_big := false
 	for sh in shots:
@@ -38,7 +40,8 @@ func _initialize() -> void:
 		var o: Dictionary = sh[3]
 		if o.has("layer"):
 			pv.set_layer(o["layer"])
-		pv.sys_mode = 1 if o.has("power") else 0
+		pv.sys_mode = 1 if o.has("power") else (2 if o.has("heat") else 0)
+		pv._apply_view()
 		pv.yaw = 0.7
 		pv.pitch = -0.35
 		for i in 45:
@@ -54,8 +57,15 @@ func _initialize() -> void:
 					var hh: Dictionary = pv.pick_at(Vector2(px, py))
 					if hh.get("kind", "") == "hull" and pv.selected.is_empty():
 						pv.selected = hh
+		if o.has("heat"):
+			var k := 0
+			for m in ar.player.mods:
+				m["heat"] = 25.0 + 70.0 * float((k * 37) % 10) / 10.0
+				k += 1
+			ar.player.hull_temp = 55.0
+			ar.player._refresh_heat_summary()
 		pv.refresh()
-		for i in 6:
+		for i in 3:
 			await process_frame
 		var img := get_root().get_viewport().get_texture().get_image()
 		var r: Rect2 = hud.p1.get_global_rect().grow(6.0)

@@ -54,6 +54,8 @@ var bar_hull: SegBar
 var bar_power: SegBar
 var bar_thr: SegBar
 var bar_wpn: SegBar
+var bar_heat: SegBar
+var _heat_warned := {}
 var lbl_score: Label
 var log_box: RichTextLabel
 var ticker: Label
@@ -785,6 +787,7 @@ func setup(a) -> void:
 	bar_power = _seg("PWR", gauges, BLUE)
 	bar_thr = _seg("THR", gauges, ORANGE)
 	bar_wpn = _seg("WPN", gauges, RED)
+	bar_heat = _seg("HEAT", gauges, AMBER)
 	lbl_telemetry = _label("", p1.body, 9)
 	lbl_target = _label("TGT none", p1.body, 9)
 
@@ -1239,6 +1242,12 @@ func _refresh_sub() -> void:
 			consumers.sort_custom(func(a, b): return float(a["prio"]) < float(b["prio"]))
 			for m in consumers:
 				t += "%s #%d   %.1f MW   %d%%\n" % [m["label"], m["id"], m["demand"], int(float(m["frac"]) * 100.0)]
+			t += "\nHEAT   hull %d%%   hottest %s   heat centre z %+.1f m\n" % [int(ship.hull_temp), ("%s #%d %d%%" % [ship.heat_hottest["label"], ship.heat_hottest["id"], int(ship.heat_peak)]) if not ship.heat_hottest.is_empty() else "-", ship.heat_centroid.z]
+			var hot: Array = ship.mods.duplicate()
+			hot.sort_custom(func(a, b): return float(a["heat"]) > float(b["heat"]))
+			for i in range(mini(4, hot.size())):
+				var hm: Dictionary = hot[i]
+				t += "%s #%d   %d%%   %.1f MW heat%s\n" % [hm["label"], hm["id"], int(float(hm["heat"])), float(hm["hwaste"]), "   OUTPUT -%d%%" % int((1.0 - float(hm["hfrac"])) * 100.0) if float(hm["hfrac"]) < 0.99 else ""]
 	sub_text.text = t
 
 
@@ -1327,6 +1336,7 @@ func _process(delta: float) -> void:
 		lbl_telemetry.text = "SPD %3.0f  HDG %03.0f  PIT %+03.0f  %s %s" % [ship.linear_velocity.length(), fposmod(rad_to_deg(atan2(f.x, -f.z)), 360.0), rad_to_deg(asin(clampf(f.y, -1, 1))), "AST" if ship.assist else "MAN", "FP" if arena.rig.first_person else "CMD"]
 	lbl_telemetry.add_theme_color_override("font_color", RED if (stuck or not ship.alive) else AMBER)
 	bar_hull.value = ship.hull_hp / ship.hull_hp_max
+	_refresh_heat()
 	bar_power.value = ship.power_frac
 	var th_d := 0.0
 	var th_p := 0.0
@@ -1352,6 +1362,27 @@ func _process(delta: float) -> void:
 	_refresh_sub()
 	if int(_slow) % 2 == 0:
 		_refresh_scoreboard()
+
+
+## Heat gauge (hottest module), row tint in the module list and one warning per module that starts to overheat.
+func _refresh_heat() -> void:
+	bar_heat.value = clampf(ship.heat_peak / ShipData.HEAT_CRIT, 0.0, 1.0)
+	bar_heat.col = ShipData.heat_color(ship.heat_peak)
+	bar_heat.queue_redraw()
+	for r in rows:
+		var m: Dictionary = r["m"]
+		var nm: Label = r["nm"]
+		if bool(m["alive"]) and float(m["heat"]) >= 60.0:
+			nm.add_theme_color_override("font_color", ShipData.heat_color(float(m["heat"])))
+	for m in ship.mods:
+		var id := int(m["id"])
+		var t := float(m["heat"])
+		if bool(m["alive"]) and t >= ShipData.HEAT_WARN and not _heat_warned.has(id):
+			_heat_warned[id] = true
+			say("OVERHEATING: %s #%d  %d%%" % [m["label"], id, int(t)], Color(1.0, 0.45, 0.2))
+			log_msg("[color=#ff8040]Overheating:[/color] %s #%d at %d%% - lower its load or switch it off" % [m["label"], id, int(t)])
+		elif t < ShipData.HEAT_WARN - 12.0:
+			_heat_warned.erase(id)
 
 
 func _refresh_scoreboard() -> void:

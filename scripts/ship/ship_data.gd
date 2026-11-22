@@ -14,6 +14,15 @@ const THRUSTER_MW_PER_M3 := 5.0
 const GENERATOR_MW_PER_M3 := 5.0
 const RCS_FRACTION := 0.10        # GDD 2.3: RCS = 10% of best-vector thruster power
 const GYRO_K := 150.0
+# Heat (GDD hidden module "Heat"). Temperatures are in % of the critical temperature (100 = modules start to burn).
+const HEAT_WASTE := 0.35          # share of the power a module consumes that ends up as heat
+const GEN_WASTE := 0.12           # share of the power a generator delivers that ends up as heat (split between generators)
+const HEAT_CAP_PER_M3 := 0.12     # MJ per % per m3 of module
+const HEAT_COND := 0.02           # MW per m2 of module surface per % of difference between module and hull
+const HEAT_RAD := 0.0008          # MW per m2 of hull per % of hull temperature (the hull is the radiator)
+const HEAT_HULL_CAP := 0.10       # MJ per % per tonne of ship
+const HEAT_WARN := 80.0           # above this a module loses output
+const HEAT_CRIT := 100.0          # above this a module takes damage
 
 const DIRS := [Vector3(0, 0, -1), Vector3(0, 0, 1), Vector3(1, 0, 0), Vector3(-1, 0, 0), Vector3(0, 1, 0), Vector3(0, -1, 0)]
 const DIR_NAMES := ["Forward (-Z)", "Back (+Z)", "Right (+X)", "Left (-X)", "Up (+Y)", "Down (-Y)"]
@@ -308,6 +317,32 @@ static func hull_triangles(rings: Array) -> Array:
 	return tris
 
 
+## Identical modules do not run equally hot: a fixed factor per module (0.75 .. 1.25) from its id and type.
+static func thermal_factor(id: int, type: String) -> float:
+	return 0.75 + 0.5 * fposmod(sin(float(id) * 12.9898 + float(type.hash() % 1000) * 0.137) * 43758.5453, 1.0)
+
+
+static func module_surface(sz: Vector3) -> float:
+	return 2.0 * (sz.x * sz.y + sz.y * sz.z + sz.x * sz.z)
+
+
+## Output multiplier of a module at temperature t (full up to HEAT_WARN, 40% at 110).
+static func heat_factor(t: float) -> float:
+	return clampf(1.0 - (t - HEAT_WARN) / 30.0 * 0.6, 0.4, 1.0)
+
+
+## Blue (cold) -> green -> yellow -> orange -> red (critical).
+static func heat_color(t: float) -> Color:
+	var k := clampf(t / HEAT_CRIT, 0.0, 1.2)
+	var stops := [[0.0, Color(0.15, 0.35, 0.85)], [0.35, Color(0.2, 0.8, 0.5)], [0.65, Color(1.0, 0.82, 0.15)], [0.85, Color(1.0, 0.4, 0.08)], [1.0, Color(0.95, 0.08, 0.04)], [1.2, Color(1.0, 0.85, 0.8)]]
+	for i in range(stops.size() - 1):
+		var a: Array = stops[i]
+		var b: Array = stops[i + 1]
+		if k <= float(b[0]):
+			return (a[1] as Color).lerp(b[1], (k - float(a[0])) / (float(b[0]) - float(a[0])))
+	return stops[stops.size() - 1][1]
+
+
 static func tri_area(t: Array) -> float:
 	return 0.5 * ((t[1] as Vector3) - (t[0] as Vector3)).cross((t[2] as Vector3) - (t[0] as Vector3)).length()
 
@@ -486,7 +521,11 @@ static func compute_stats(bp: Dictionary) -> Dictionary:
 	var best := 0.0
 	for t in thrust:
 		best = maxf(best, t)
+	var served_hard := minf(p_out, p_idle + 0.5 * p_peak)
+	var radiate := maxf(HEAT_RAD * area, 0.001)
 	return {
+		"heat_idle": minf(p_idle, p_out) * (HEAT_WASTE + GEN_WASTE) / radiate,
+		"heat_hard": served_hard * (HEAT_WASTE + GEN_WASTE) / radiate,
 		"length": bounds.size.z, "beam": bounds.size.x, "height": bounds.size.y, "longest": longest,
 		"area": area, "thickness": thickness, "armor": thickness * ARMOR_PROTECTION,
 		"hull_hp": area * thickness * HULL_HP_PER_M3, "hull_mass": hull_mass,

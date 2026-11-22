@@ -9,7 +9,7 @@ extends Control
 ##               the others (no two modules overlap), with leader lines back to where they sit.
 ##   Onion     - the ship is cut into decks (horizontal layers). Pick a deck: everything above it is
 ##               hidden, the cut shows the hull outline and the footprint of the modules on that deck.
-##   Systems   - command / engine / turret links, or the power grid, drawn on the model.
+##   Systems   - command / engine / turret links, the power grid, or the heat map, drawn on the model.
 ## Drag = orbit, wheel = zoom, double click = reset the camera.
 
 signal expand_requested(on: bool)
@@ -121,6 +121,7 @@ var cut_lines: ImmediateMesh
 var deck_lines: ImmediateMesh
 var com_mi: MeshInstance3D
 var fwd_mi: MeshInstance3D
+var heat_mi: MeshInstance3D
 
 # camera
 var yaw := 0.7
@@ -145,7 +146,7 @@ var show_lines := true
 var layers := 6
 var layer := 3               # 0 = lowest deck, layers = all decks
 var ghost_above := true
-var sys_mode := 0            # 0 links, 1 power
+var sys_mode := 0            # 0 links, 1 power, 2 heat
 var hover := {}
 var selected := {}
 var _cut_dirty := true
@@ -419,6 +420,21 @@ func bind(s: Ship) -> void:
 	fwd_mi.material_override = cmat
 	fwd_mi.position = Vector3(hull_box.get_center().x, hull_box.get_center().y, hull_box.position.z - longest * 0.06)
 	world.add_child(fwd_mi)
+	heat_mi = MeshInstance3D.new()
+	var hsm := SphereMesh.new()
+	hsm.radius = longest * 0.035
+	hsm.height = longest * 0.07
+	hsm.radial_segments = 14
+	hsm.rings = 7
+	heat_mi.mesh = hsm
+	var hmat := StandardMaterial3D.new()
+	hmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	hmat.albedo_color = Color(1.0, 0.15, 0.08, 0.75)
+	hmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	hmat.no_depth_test = true
+	hmat.render_priority = 7
+	heat_mi.material_override = hmat
+	world.add_child(heat_mi)
 	# decks: about one per metre-ish of height, scaled with the ship
 	var hh := maxf(hull_box.size.y, 0.5)
 	layers = clampi(int(round(hh / maxf(longest * 0.05, 1.0))), 4, 12)
@@ -707,6 +723,8 @@ func _module_color(m: Dictionary) -> Color:
 		return Color(0.09, 0.08, 0.08)
 	if view == SYSTEMS and sys_mode == 1:
 		return _power_color(m)
+	if view == SYSTEMS and sys_mode == 2:
+		return ShipData.heat_color(float(m["heat"]))
 	var def: Dictionary = ShipData.MODULES[String(m["type"])]
 	var base: Color = def["color"]
 	var f := clampf(float(m["hp"]) / maxf(float(m["max"]), 0.001), 0.0, 1.0)
@@ -733,6 +751,10 @@ func module_status(m: Dictionary) -> Array:
 		return ["OFFLINE (switched off)", AMBER]
 	if float(m["demand"]) > 0.0 and float(m["frac"]) < 0.2:
 		return ["UNPOWERED", RED]
+	if float(m["heat"]) >= ShipData.HEAT_CRIT:
+		return ["CRITICAL HEAT  %d%%  (burning)" % int(float(m["heat"])), RED]
+	if float(m["heat"]) >= ShipData.HEAT_WARN:
+		return ["OVERHEATING  %d%%  (output -%d%%)" % [int(float(m["heat"])), int((1.0 - float(m["hfrac"])) * 100.0)], AMBER]
 	if float(m["demand"]) > 0.0 and float(m["frac"]) < 0.95:
 		return ["LOW POWER  %d%%" % int(float(m["frac"]) * 100.0), AMBER]
 	return ["ONLINE", GREEN]
@@ -770,6 +792,7 @@ func _apply_view() -> void:
 	if com_mi != null:
 		com_mi.visible = show_com and view != EXPLODED
 		fwd_mi.visible = view != EXPLODED
+		heat_mi.visible = view == SYSTEMS and sys_mode == 2
 	for sc in sections:
 		(sc["skin"] as MeshInstance3D).visible = hull_mode <= 1
 		(sc["wire"] as MeshInstance3D).visible = hull_mode != 3
@@ -790,6 +813,8 @@ func refresh() -> void:
 	var ghost := 1.0 if (view == ONION and ghost_above) else 0.0
 	var integrity := clampf(ship.hull_hp / ship.hull_hp_max, 0.0, 1.0)
 	var hc := Color(0.62, 0.55, 0.5).lerp(Color(0.5, 0.1, 0.06), 1.0 - integrity)
+	if view == SYSTEMS and sys_mode == 2:
+		hc = Color(0.4, 0.4, 0.45).lerp(ShipData.heat_color(ship.hull_temp), 0.85)
 	var a_mul := 0.22
 	var rim := 1.0
 	match view:
@@ -871,7 +896,7 @@ func _rebuild_overlay() -> void:
 				pts.append((by_item[ib] as Dictionary)["disp"])
 				cols.append(col)
 				cols.append(col)
-		else:
+		elif sys_mode == 1:
 			for m in ship.mods:
 				if String(m["type"]) == "generator" or not _needs_power(m):
 					continue
@@ -966,6 +991,9 @@ func _process(delta: float) -> void:
 		_update_hover()
 	if view == EXPLODED or view == SYSTEMS:
 		_rebuild_overlay()
+	if heat_mi != null:
+		heat_mi.position = ship.heat_centroid
+		heat_mi.visible = view == SYSTEMS and sys_mode == 2 and ship.heat_peak > 2.0
 	if _t > 0.25:
 		_t = 0.0
 		refresh()
@@ -1073,6 +1101,7 @@ func info_lines(h: Dictionary, max_lines := 99) -> Array:
 			out.append(_ln("Output %.1f MW" % float(ms["out"])))
 		elif float(m["demand"]) > 0.0:
 			out.append(_ln("Power draw %.1f MW  (%d%% supplied)" % [float(m["demand"]), int(float(m["frac"]) * 100.0)]))
+		out.append(_ln("Heat %d%%   %.1f MW waste%s" % [int(float(m["heat"])), float(m["hwaste"]), "   x%.2f" % float(m["hfac"])], ShipData.heat_color(float(m["heat"])).lightened(0.2)))
 		match String(m["type"]):
 			"thruster":
 				out.append(_ln("Thrust %.0f kN  %s" % [float(ms["thrust"]) * float(m["ef"]), ShipData.DIR_NAMES[int(m["dir"])]]))
@@ -1129,18 +1158,31 @@ func info_lines(h: Dictionary, max_lines := 99) -> Array:
 func _status_line() -> String:
 	match view:
 		EXPLODED:
-			return "Hull sections and modules pulled apart.  Spread %d%%" % int(spread * 100.0)
+			return "Hull sections and modules pulled apart.  Spread %d%%" % int(spread * 100.0) if expanded else "Spread %d%%" % int(spread * 100.0)
 		ONION:
 			if layer >= layers:
 				return "ALL %d DECKS" % layers
 			var r := deck_range(layer)
+			if not expanded:
+				return "DECK %d/%d" % [layer + 1, layers]
 			return "DECK %d / %d   y %+.1f .. %+.1f m   (above hidden)" % [layer + 1, layers, r.x, r.y]
 		SYSTEMS:
 			if sys_mode == 0:
-				return "Links:  blue command   orange engine   red turret   grey broken"
+				return "Links:  blue command   orange engine   red turret   grey broken" if expanded else "blue cmd  orange eng  red gun"
+			if sys_mode == 2:
+				var hot := "-"
+				if not ship.heat_hottest.is_empty():
+					hot = "%s %d%%" % [ABBR.get(String(ship.heat_hottest["type"]), "?"), int(ship.heat_peak)]
+				if expanded:
+					return "Heat  hull %d%%   hottest %s   red dot = centre of heat" % [int(ship.hull_temp), hot]
+				return "hull %d%%  hot %s" % [int(ship.hull_temp), hot]
 			if ship.power_supply <= 0.0:
 				return "NO POWER SOURCE"
+			if not expanded:
+				return "Power %.0f/%.0f MW" % [ship.power_demand, ship.power_supply]
 			return "Power  %.1f / %.1f MW (%d%%)   green ok  amber short  red starved" % [ship.power_demand, ship.power_supply, int(clampf(ship.power_frac, 0.0, 1.0) * 100.0)]
+	if not expanded:
+		return "%.0f m  %.0f t" % [longest, float(ship.stats["mass"])]
 	return "%.0f m   %.0f t   %d modules" % [longest, float(ship.stats["mass"]), ship.mods.size()]
 
 
@@ -1175,6 +1217,8 @@ func _draw_overlay() -> void:
 				continue
 			var m: Dictionary = it["m"]
 			var txt := "%s %d" % [ABBR.get(String(m["type"]), "?"), int(it["id"])]
+			if view == SYSTEMS and sys_mode == 2:
+				txt = "%s %d%%" % [ABBR.get(String(m["type"]), "?"), int(float(m["heat"]))]
 			Hud.outlined(layer2d, txt, sp + Vector2(-10, 3), fs, _module_color(m).lightened(0.45))
 	# status line above the bottom bar
 	Hud.outlined(layer2d, _status_line(), Vector2(5, layer2d.size.y - 23), fs, Color(1.0, 0.8, 0.4))
@@ -1332,11 +1376,13 @@ func _build_controls() -> void:
 	# Systems: links / power, labels
 	var b3: HBoxContainer = bars[SYSTEMS]
 	var grp := ButtonGroup.new()
-	var bl := _btn("Links", b3, func(on: bool): if on: sys_mode = 0; refresh(), true, true)
-	var bp := _btn("Power", b3, func(on: bool): if on: sys_mode = 1; refresh(), true, false)
+	var bl := _btn("Links", b3, func(on: bool): if on: sys_mode = 0; _apply_view(); refresh(), true, true)
+	var bp := _btn("Power", b3, func(on: bool): if on: sys_mode = 1; _apply_view(); refresh(), true, false)
+	var bh := _btn("Heat", b3, func(on: bool): if on: sys_mode = 2; _apply_view(); refresh(), true, false)
 	bl.button_group = grp
 	bp.button_group = grp
-	_btn("Labels", b3, func(on: bool): labels[SYSTEMS] = on; layer2d.queue_redraw(), true, labels[SYSTEMS])
+	bh.button_group = grp
+	_btn("Tags", b3, func(on: bool): labels[SYSTEMS] = on; layer2d.queue_redraw(), true, labels[SYSTEMS])
 	# top right: hull mode + expand
 	var tr := VBoxContainer.new()
 	tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
