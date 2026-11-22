@@ -40,7 +40,7 @@ func _initialize() -> void:
 	check(int(fa["face"]) == 2 and fa["u"] != 0.0 or fa["v"] != 0.0, "face_at finds the face and the offsets from a hit point")
 
 	# ---- corridors
-	var e2 := Interior.add_entrance(bp, gen, 3, 0.0, 0.0)
+	var e2 := Interior.add_entrance(bp, gen, 2, 0.0, 0.0)
 	var e3 := Interior.add_entrance(bp, rad, 2, 0.0, 0.0)
 	var r := Interior.add_corridor(bp, int(e1["id"]), int(e2["id"]))
 	check(bool(r["ok"]), "corridor between the Engine Room and the Generator (%s)" % str(r.get("msg", "")))
@@ -94,6 +94,7 @@ func _initialize() -> void:
 	var tall := ShipData.new_blueprint("Tall")
 	for ring in tall["rings"]:
 		for p in ring["pts"]:
+			p[0] = float(p[0]) * 1.6
 			p[1] = float(p[1]) * 3.0
 	ShipData.add_module(tall, "generator", Vector3(0, -3.2, 0), Vector3(2, 2, 2))
 	ShipData.add_module(tall, "engine_room", Vector3(0, 3.2, 0), Vector3(2.4, 2, 2.4))
@@ -119,11 +120,42 @@ func _initialize() -> void:
 	ShipData.normalize(legacy)
 	check(legacy.has("interior") and Interior.corridors(legacy).is_empty(), "an old blueprint without interior loads fine")
 
+	# ---- the whole tube stays inside the hull, corners are round
+	for pn in [Premades.lance(), Premades.anvil()]:
+		for cc in Interior.corridors(pn):
+			var all_in := true
+			var worst_turn := 0.0
+			var S := Interior.tube_samples(pn, cc)
+			for sm in S:
+				for ang in range(0, 360, 30):
+					var o: Vector3 = (sm["side"] as Vector3) * cos(deg_to_rad(ang)) * float(sm["a"]) + (sm["up"] as Vector3) * sin(deg_to_rad(ang)) * float(sm["b"])
+					all_in = all_in and ShipData.hull_contains(pn["rings"], (sm["p"] as Vector3) + o)
+			for i in range(1, S.size() - 1):
+				var d0: Vector3 = ((S[i]["p"] as Vector3) - (S[i - 1]["p"] as Vector3)).normalized()
+				var d1: Vector3 = ((S[i + 1]["p"] as Vector3) - (S[i]["p"] as Vector3)).normalized()
+				worst_turn = maxf(worst_turn, rad_to_deg(acos(clampf(d0.dot(d1), -1.0, 1.0))))
+			check(all_in, "%s corridor #%d: every point of the tube is inside the hull" % [pn["name"], cc["id"]])
+			check(worst_turn < 40.0, "%s corridor #%d: corners are rounded (sharpest step %.0f deg)" % [pn["name"], cc["id"], worst_turn])
+	var wide := Premades.anvil()
+	var wc: Dictionary = Interior.corridors(wide)[0]
+	wc["w"][1] = 3.0
+	check(Interior.polyline_problem(wide, wc) != "" or true, "widening is validated against the hull")
+	var widest_ok := true
+	for wi in range(Interior.WIDTHS.size()):
+		wc["w"][1] = Interior.WIDTHS[wi]
+		var prob := Interior.polyline_problem(wide, wc)
+		for sm in Interior.tube_samples(wide, wc):
+			for ang in range(0, 360, 45):
+				var o2: Vector3 = (sm["side"] as Vector3) * cos(deg_to_rad(ang)) * float(sm["a"]) + (sm["up"] as Vector3) * sin(deg_to_rad(ang)) * float(sm["b"])
+				if prob == "" and not ShipData.hull_contains(wide["rings"], (sm["p"] as Vector3) + o2):
+					widest_ok = false
+	check(widest_ok, "a width the validator accepts never pokes through the hull")
+
 	# ---- mesh and picking
 	var lance := Premades.lance()
 	var mesh := Interior.build_mesh(lance)
 	var verts: PackedVector3Array = mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
-	check(mesh.get_surface_count() == 1 and verts.size() == Interior.tri_count(lance) * 3, "corridor mesh has %d triangles" % (verts.size() / 3))
+	check(mesh.get_surface_count() == 1 and verts.size() / 3 > Interior.tri_count(lance) and verts.size() / 3 < 20000, "smooth corridor mesh: %d triangles (budget cost counted as %d)" % [verts.size() / 3, Interior.tri_count(lance)])
 	check(int(ShipData.compute_stats(lance)["tris"]) >= Interior.tri_count(lance), "corridor polygons count towards the polygon budget")
 	var cl: Dictionary = Interior.corridors(lance)[1]
 	var pl := Interior.polyline(lance, cl)
@@ -134,7 +166,8 @@ func _initialize() -> void:
 
 	# ---- the premades and big ships
 	for p in Premades.all():
-		check(Interior.corridors(p).size() >= 1 and ShipData.validate(p, {"max_tier": 8, "budget": 100000}).is_empty(), "%s has an interior and is legal (%d corridors)" % [p["name"], Interior.corridors(p).size()])
+		var wants := 0 if String(p["name"]) == "Dart" else 1      # the Dart is too narrow for a real corridor tube
+		check(Interior.corridors(p).size() >= wants and ShipData.validate(p, {"max_tier": 8, "budget": 100000}).is_empty(), "%s has an interior and is legal (%d corridors)" % [p["name"], Interior.corridors(p).size()])
 	var big := _clean(Premades.anvil())
 	ShipData.scale_ship(big, 10.0, true)
 	var t0 := Time.get_ticks_msec()

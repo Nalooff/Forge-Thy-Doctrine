@@ -990,7 +990,7 @@ func _view_bounds() -> AABB:
 
 
 func _target_dist() -> float:
-	return radius * 0.8 / sin(deg_to_rad(cam.fov * 0.5)) / zoom
+	return radius * 0.74 / sin(deg_to_rad(cam.fov * 0.5)) / zoom
 
 
 func _process(delta: float) -> void:
@@ -1018,6 +1018,7 @@ func _process(delta: float) -> void:
 		yaw += delta * 0.3
 	var off := Vector3(0, 0, dist).rotated(Vector3.RIGHT, pitch).rotated(Vector3.UP, yaw)
 	cam.look_at_from_position(center + off, center, Vector3.UP)
+	cam.h_offset = lerpf(cam.h_offset, dist * (0.09 if view == ONION else 0.0), 1.0 - exp(-delta * 6.0))   # make room for the deck slider
 	cam.near = maxf(dist * 0.02, 0.05)
 	cam.far = dist * 12.0 + radius * 4.0
 	_hover_t += delta

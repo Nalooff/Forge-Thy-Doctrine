@@ -15,9 +15,10 @@ func _initialize() -> void:
 	var hud = ar.hud
 	var pv = hud.preview
 	var shots := [
-		["corr_onion", 2, false, {"layer": 99, "cor": true}],
-		["corr_onion_big", 2, true, {"layer": 99, "cor": true}],
-		["corr_basic_big", 0, true, {"basic_corr": true, "cor": true}],
+		["basic", 0, false, {"kind": "mod", "type": "generator"}],
+		["onion", 2, false, {"layer": 99, "cor": true}],
+		["basic_big", 0, true, {"basic_corr": true, "cor": true}],
+		["onion_big", 2, true, {"layer": 99, "cor": true}],
 	]
 	var cur_big := false
 	for sh in shots:

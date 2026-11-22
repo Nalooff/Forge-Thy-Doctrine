@@ -100,9 +100,22 @@ static func longest(bp: Dictionary) -> float:
 	return maxf(b.size.x, maxf(b.size.y, b.size.z))
 
 
-## Width of a normal corridor: scales with the ship (0.9 m on a corvette up to 3 m on a capital ship).
+## Width of a normal corridor: scales with the ship (0.8 m on a corvette up to 3 m on a capital ship).
 static func base_width(bp: Dictionary) -> float:
-	return clampf(longest(bp) * 0.06, 0.9, 3.0)
+	return clampf(longest(bp) * 0.05, 0.8, 3.0)
+
+
+## Space kept between a corridor and the hull skin (the armour takes room too).
+static func margin(bp: Dictionary) -> float:
+	return 0.04 + 0.5 * float(bp.get("thickness", 0.1))
+
+
+## Half width and half height of the tube for a width factor (a ladder shaft is narrow and square).
+static func tube_half(bp: Dictionary, wf: float, kind: int) -> Vector2:
+	var w0 := base_width(bp)
+	if kind == 3:
+		return Vector2(0.38 * w0, 0.38 * w0)
+	return Vector2(0.5 * w0 * wf, 0.5 * w0 * (1.35 + 0.2 * (wf - 1.0)))
 
 
 static func _tangents(axis: int) -> Array:
@@ -168,8 +181,11 @@ static func add_entrance(bp: Dictionary, module_id: int, face: int, u: float, v:
 	var it := ensure(bp)
 	var e := {"id": int(it["next_id"]), "module": module_id, "face": face, "u": clampf(u, -0.85, 0.85), "v": clampf(v, -0.85, 0.85)}
 	var stub := entrance_stub(bp, e)
-	if not ShipData.hull_contains(bp["rings"], stub):
-		return {"ok": false, "msg": "That face is against the hull: no room for a corridor."}
+	var nrm: Vector3 = ShipData.DIRS[face]
+	var fr := _frame(nrm, Vector3.UP)
+	var ab0 := tube_half(bp, 1.0, 0)
+	if not ShipData.hull_contains(bp["rings"], stub) or _tube_problem(bp, stub, fr[0], fr[1], ab0.x, ab0.y, [module_id]) == "leaves the hull":
+		return {"ok": false, "msg": "That face is too close to the hull: no room for a corridor."}
 	var r := base_width(bp) * 0.5
 	for m2 in bp["modules"]:
 		if int(m2["id"]) != module_id and ShipData.module_box(m2).grow(r * 0.5).has_point(stub):
@@ -386,43 +402,177 @@ static func cycle_width(c: Dictionary, seg: int) -> float:
 	return float(w[seg])
 
 
-# ================================================================== checks
-static func _clearance_r(bp: Dictionary) -> float:
-	return base_width(bp) * 0.6
+# ================================================================== tube geometry
+## Right-handed frame (side, up) for a direction of travel; `up_hint` keeps floors level when it can.
+static func _frame(t: Vector3, up_hint: Vector3) -> Array:
+	var up := up_hint - t * up_hint.dot(t)
+	if up.length() < 0.2:
+		up = Vector3.BACK - t * Vector3.BACK.dot(t)
+		if up.length() < 0.2:
+			up = Vector3.RIGHT - t * Vector3.RIGHT.dot(t)
+	up = up.normalized()
+	var side := t.cross(up).normalized()
+	return [side, up]
 
 
-static func _point_ok(bp: Dictionary, p: Vector3, r: float) -> bool:
+## "" when a tube cross-section at `pos` is entirely inside the hull and clear of the modules, otherwise why not.
+static func _tube_problem(bp: Dictionary, pos: Vector3, side: Vector3, up: Vector3, a: float, b: float, exempt: Array) -> String:
 	var rings: Array = bp["rings"]
-	if not ShipData.hull_contains(rings, p):
-		return false
-	for o in [Vector3(r, 0, 0), Vector3(-r, 0, 0), Vector3(0, r, 0), Vector3(0, -r, 0)]:
-		if not ShipData.hull_contains(rings, p + o):
-			return false
-	return true
+	var m := margin(bp)
+	var aa := a + m
+	var bb := b + m
+	for o in [Vector3.ZERO, side * aa, -side * aa, up * bb, -up * bb, side * aa * 0.8 + up * bb * 0.8, side * aa * 0.8 - up * bb * 0.8, -side * aa * 0.8 + up * bb * 0.8, -side * aa * 0.8 - up * bb * 0.8]:
+		if not ShipData.hull_contains(rings, pos + (o as Vector3)):
+			return "leaves the hull"
+	var ext := Vector3(absf(side.x) * a + absf(up.x) * b, absf(side.y) * a + absf(up.y) * b, absf(side.z) * a + absf(up.z) * b) + Vector3(0.03, 0.03, 0.03)
+	var box := AABB(pos - ext, ext * 2.0)
+	for mod in bp["modules"]:
+		if exempt.has(int(mod["id"])):
+			continue
+		if ShipData.module_box(mod).intersects(box):
+			return "cuts through %s #%d" % [ShipData.MODULES[String(mod["type"])]["label"], int(mod["id"])]
+	return ""
 
 
-## "" if the path is fine, otherwise why it is not.
+## Modules a path may touch near its two ends (the modules it starts from and arrives at).
+static func _exempt_near(bp: Dictionary, c: Dictionary, pos: Vector3, ex: float) -> Array:
+	var out: Array = []
+	for key in ["a", "b"]:
+		var e := entrance(bp, int(c[key]))
+		if not e.is_empty() and entrance_pos(bp, e).distance_to(pos) < ex:
+			out.append(int(e["module"]))
+	return out
+
+
+## Round the corners of the path (quadratic arcs) and keep as much rounding as still fits in the hull. Each point
+## remembers the original segment it belongs to.
+static func smooth_path(bp: Dictionary, c: Dictionary) -> Array:
+	var raw := polyline(bp, c)
+	var P: Array = []
+	for p in raw:
+		if P.is_empty() or (P[P.size() - 1] as Vector3).distance_to(p) > 1e-3:
+			P.append(p)
+	var n := P.size()
+	var out: Array = []
+	if n < 2:
+		return out
+	var w0 := base_width(bp)
+	var wl: Array = c["w"]
+	out.append({"p": P[0], "seg": 0})
+	for i in range(1, n - 1):
+		var vin := (P[i] as Vector3) - (P[i - 1] as Vector3)
+		var vout := (P[i + 1] as Vector3) - (P[i] as Vector3)
+		var lin := vin.length()
+		var lout := vout.length()
+		var u := vin / lin
+		var v := vout / lout
+		var th := acos(clampf(u.dot(v), -1.0, 1.0))
+		if th < deg_to_rad(4.0):
+			out.append({"p": P[i], "seg": i - 1})
+			continue
+		var dmax := 0.5 * minf(lin, lout)
+		var d0 := minf(dmax, 1.6 * w0 * tan(th * 0.5))
+		var wf := maxf(float(wl[i - 1]) if i - 1 < wl.size() else 1.0, float(wl[i]) if i < wl.size() else 1.0)
+		var kind := maxi(seg_kind(P[i - 1], P[i]), seg_kind(P[i], P[i + 1]))
+		var ab := tube_half(bp, wf, kind)
+		var steps := clampi(int(th / deg_to_rad(11.0)), 3, 10)
+		var best: Array = []
+		for f in [1.0, 0.75, 0.55, 0.38, 0.25]:
+			var d := maxf(d0 * f, minf(0.12 * w0, dmax))
+			var pa: Vector3 = (P[i] as Vector3) - u * d
+			var pb: Vector3 = (P[i] as Vector3) + v * d
+			var pts: Array = []
+			var ok := true
+			for k in range(steps + 1):
+				var s := float(k) / float(steps)
+				var q: Vector3 = pa * (1.0 - s) * (1.0 - s) + (P[i] as Vector3) * 2.0 * s * (1.0 - s) + pb * s * s
+				var tg: Vector3 = ((P[i] as Vector3) - pa) * 2.0 * (1.0 - s) + (pb - (P[i] as Vector3)) * 2.0 * s
+				pts.append({"p": q, "seg": i - 1 if s < 0.5 else i})
+				if ok:
+					var fr := _frame(tg.normalized(), Vector3.UP)
+					if _tube_problem(bp, q, fr[0], fr[1], ab.x, ab.y, _exempt_near(bp, c, q, w0 * 1.4)) != "":
+						ok = false
+			best = pts
+			if ok:
+				break
+		out.append_array(best)
+	out.append({"p": P[n - 1], "seg": n - 2})
+	# long straight spans get extra points so widths can blend and ribs can run along them
+	var dense: Array = [out[0]]
+	for i in range(1, out.size()):
+		var p0: Vector3 = out[i - 1]["p"]
+		var p1: Vector3 = out[i]["p"]
+		var k := int(ceil(p0.distance_to(p1) / (2.2 * w0)))
+		for j in range(1, k):
+			dense.append({"p": p0.lerp(p1, float(j) / float(k)), "seg": out[i]["seg"] if int(out[i]["seg"]) == int(out[i - 1]["seg"]) else out[i - 1]["seg"]})
+		dense.append(out[i])
+	return dense
+
+
+## The corridor as a sequence of cross-sections: {p, t, side, up, a, b, kind, seg, wf}.
+static func tube_samples(bp: Dictionary, c: Dictionary) -> Array:
+	var path := smooth_path(bp, c)
+	var n := path.size()
+	var raw := polyline(bp, c)
+	var w0 := base_width(bp)
+	var wl: Array = c["w"]
+	var S: Array = []
+	for i in range(n):
+		var seg := clampi(int(path[i]["seg"]), 0, maxi(raw.size() - 2, 0))
+		S.append({"p": path[i]["p"], "seg": seg, "wf": float(wl[seg]) if seg < wl.size() else 1.0, "kind": seg_kind(raw[seg], raw[seg + 1])})
+	# blend width changes over about two corridor widths
+	var along: Array = [0.0]
+	for i in range(1, n):
+		along.append(float(along[i - 1]) + (S[i]["p"] as Vector3).distance_to(S[i - 1]["p"]))
+	for i in range(n):
+		var sum := 0.0
+		var cnt := 0.0
+		for j in range(n):
+			if absf(float(along[j]) - float(along[i])) <= 1.6 * w0:
+				sum += float(S[j]["wf"])
+				cnt += 1.0
+		S[i]["wfs"] = maxf(float(S[i]["wf"]) if int(S[i]["kind"]) == 3 else sum / maxf(cnt, 1.0), 1.0)
+	var up_prev := Vector3.UP
+	for i in range(n):
+		var t: Vector3 = ((S[mini(i + 1, n - 1)]["p"] as Vector3) - (S[maxi(i - 1, 0)]["p"] as Vector3)).normalized()
+		var hint := up_prev
+		if absf(t.y) < 0.7:
+			hint = Vector3.UP                       # keep floors level while the corridor is mostly horizontal
+		var fr := _frame(t, hint)
+		up_prev = fr[1]
+		var ab := tube_half(bp, float(S[i]["wfs"]), int(S[i]["kind"]))
+		S[i]["t"] = t
+		S[i]["side"] = fr[0]
+		S[i]["up"] = fr[1]
+		S[i]["a"] = ab.x
+		S[i]["b"] = ab.y
+	return S
+
+
+## Samples of the tube closer together than `step` (for checking, not for drawing).
+static func _dense(S: Array, step: float) -> Array:
+	var out: Array = []
+	for i in range(S.size() - 1):
+		var s0: Dictionary = S[i]
+		var s1: Dictionary = S[i + 1]
+		var k := maxi(int(ceil((s0["p"] as Vector3).distance_to(s1["p"]) / step)), 1)
+		for j in range(k):
+			var f := float(j) / float(k)
+			out.append({"p": (s0["p"] as Vector3).lerp(s1["p"], f), "side": (s0["side"] as Vector3).lerp(s1["side"], f).normalized(), "up": (s0["up"] as Vector3).lerp(s1["up"], f).normalized(), "a": lerpf(float(s0["a"]), float(s1["a"]), f), "b": lerpf(float(s0["b"]), float(s1["b"]), f)})
+	if not S.is_empty():
+		out.append(S[S.size() - 1])
+	return out
+
+
+## "" if the whole tube (rounded corners and widened parts included) is inside the hull and clear of modules.
 static func polyline_problem(bp: Dictionary, c: Dictionary) -> String:
-	var poly := polyline(bp, c)
-	if poly.size() < 2:
+	if polyline(bp, c).size() < 2:
 		return "has a missing entrance"
-	var r := _clearance_r(bp)
-	var ex := base_width(bp) * 1.6
-	var mods: Array = bp["modules"]
-	var step := maxf(r * 0.8, 0.2)
-	for i in range(poly.size() - 1):
-		var a := poly[i]
-		var b := poly[i + 1]
-		var n := maxi(int(ceil(a.distance_to(b) / step)), 1)
-		for k in range(n + 1):
-			var p := a.lerp(b, float(k) / float(n))
-			var near_end := p.distance_to(poly[0]) < ex or p.distance_to(poly[poly.size() - 1]) < ex
-			if not near_end and not _point_ok(bp, p, r * 0.7):
-				return "leaves the hull"
-			if not near_end:
-				for m in mods:
-					if ShipData.module_box(m).grow(r * 0.25).has_point(p):
-						return "cuts through %s #%d" % [ShipData.MODULES[String(m["type"])]["label"], int(m["id"])]
+	var w0 := base_width(bp)
+	for s in _dense(tube_samples(bp, c), maxf(w0 * 0.4, 0.15)):
+		var why := _tube_problem(bp, s["p"], s["side"], s["up"], float(s["a"]), float(s["b"]), _exempt_near(bp, c, s["p"], w0 * 1.4))
+		if why != "":
+			return why
 	return ""
 
 
@@ -447,18 +597,24 @@ class RouteStar extends AStar3D:
 		return get_point_position(from_id).distance_to(get_point_position(to_id))
 
 
-static func _line_geo(bp: Dictionary, a: Vector3, b: Vector3, r: float, ex: float, boxes: Array) -> bool:
-	var step := maxf(r * 0.8, 0.2)
-	var n := maxi(int(ceil(a.distance_to(b) / step)), 1)
+static func _line_ok(bp: Dictionary, pa: Vector3, pb: Vector3, ea: Dictionary, eb: Dictionary) -> bool:
+	var w0 := base_width(bp)
+	var ab := tube_half(bp, 1.0, 0)
+	var d := pb - pa
+	var n := maxi(int(ceil(d.length() / maxf(w0 * 0.4, 0.15))), 1)
+	var t := d.normalized() if d.length() > 1e-6 else Vector3.RIGHT
+	var fr := _frame(t, Vector3.UP)
+	var ca := entrance_pos(bp, ea)
+	var cb := entrance_pos(bp, eb)
 	for k in range(n + 1):
-		var p := a.lerp(b, float(k) / float(n))
-		if p.distance_to(a) < ex * 0.5 or p.distance_to(b) < ex * 0.5:
-			continue
-		if not _point_ok(bp, p, r * 0.7):
+		var p := pa.lerp(pb, float(k) / float(n))
+		var ex: Array = []
+		if p.distance_to(ca) < w0 * 1.6:
+			ex.append(int(ea["module"]))
+		if p.distance_to(cb) < w0 * 1.6:
+			ex.append(int(eb["module"]))
+		if _tube_problem(bp, p, fr[0], fr[1], ab.x, ab.y, ex) != "":
 			return false
-		for bx in boxes:
-			if (bx as AABB).has_point(p):
-				return false
 	return true
 
 
@@ -466,14 +622,18 @@ static func _line_geo(bp: Dictionary, a: Vector3, b: Vector3, r: float, ex: floa
 static func route(bp: Dictionary, ea: Dictionary, eb: Dictionary) -> Dictionary:
 	var rings: Array = bp["rings"]
 	var w0 := base_width(bp)
-	var r := w0 * 0.6
+	var ab := tube_half(bp, 1.0, 0)
+	var r := ab.x + margin(bp)               # clearance sideways
+	var rv := ab.y + margin(bp)              # clearance up and down (a corridor is taller than wide)
 	var pa := entrance_stub(bp, ea)
 	var pb := entrance_stub(bp, eb)
 	var boxes: Array = []
-	for m in bp["modules"]:
-		boxes.append(ShipData.module_box(m).grow(r * 0.55))
+	var grow := Vector3(r, rv, r)
+	for mod in bp["modules"]:
+		var bx := ShipData.module_box(mod)
+		boxes.append(AABB(bx.position - grow, bx.size + grow * 2.0))
 	var ex := w0 * 1.6
-	if _line_geo(bp, pa, pb, r, ex, boxes):
+	if _line_ok(bp, pa, pb, ea, eb):
 		return {"ok": true, "pts": []}
 	# ---- voxel grid over the hull
 	var hb := ShipData.hull_bounds(rings)
@@ -506,7 +666,8 @@ static func route(bp: Dictionary, ea: Dictionary, eb: Dictionary) -> Dictionary:
 				var p2 := Vector2(x, y)
 				for ip in inset:
 					if Geometry2D.is_point_in_polygon(p2, ip):
-						inh[(iz * dims.y + iy) * dims.x + ix] = 1
+						if Geometry2D.is_point_in_polygon(Vector2(x, y + rv), poly) and Geometry2D.is_point_in_polygon(Vector2(x, y - rv), poly):
+							inh[(iz * dims.y + iy) * dims.x + ix] = 1
 						break
 	var free := inh.duplicate()
 	for bx in boxes:
@@ -700,27 +861,29 @@ static func auto_connect(bp: Dictionary) -> int:
 		return 0
 	for t in targets:
 		var d := ShipData.v3(t["pos"]) - ShipData.v3(hub_in["pos"])
-		var order := _faces_toward(-d)   # the target's faces, nearest to the hub first
-		var ea := -1
-		for f in order:
-			var res := add_entrance(bp, int(t["id"]), f, 0.0, 0.0)
-			if bool(res["ok"]):
-				ea = int(res["id"])
-				break
-		var eb := -1
-		var spread := (-0.55 + 0.35 * float(k))
-		for f in _faces_toward(d):       # the hub's faces, nearest to the target first
-			var res2 := add_entrance(bp, int(hub_in["id"]), f, clampf(spread, -0.8, 0.8), 0.0)
-			if not bool(res2["ok"]):
-				res2 = add_entrance(bp, int(hub_in["id"]), f, 0.0, clampf(spread, -0.8, 0.8))
-			if bool(res2["ok"]):
-				eb = int(res2["id"])
-				break
+		var done := false
+		var spread := clampf(-0.55 + 0.35 * float(k), -0.8, 0.8)
 		k += 1
-		if ea < 0 or eb < 0:
-			continue
-		if bool(add_corridor(bp, ea, eb)["ok"]):
-			made += 1
+		# try the faces that look at each other first, then the others, until a corridor really fits
+		for tf in _faces_toward(-d):
+			if done:
+				break
+			var r1 := add_entrance(bp, int(t["id"]), tf, 0.0, 0.0)
+			if not bool(r1["ok"]):
+				continue
+			for hf in _faces_toward(d):
+				var r2 := add_entrance(bp, int(hub_in["id"]), hf, spread, 0.0)
+				if not bool(r2["ok"]):
+					r2 = add_entrance(bp, int(hub_in["id"]), hf, 0.0, spread)
+				if not bool(r2["ok"]):
+					continue
+				if bool(add_corridor(bp, int(r1["id"]), int(r2["id"]))["ok"]):
+					made += 1
+					done = true
+					break
+				remove_entrance(bp, int(r2["id"]))
+			if not done:
+				remove_entrance(bp, int(r1["id"]))
 	return made
 
 
@@ -732,6 +895,7 @@ static func _faces_toward(d: Vector3) -> Array:
 
 
 # ================================================================== mesh
+## Polygon budget cost of the interior: a nominal 12 per segment and door (corridors are drawn in the inspector only).
 static func tri_count(bp: Dictionary) -> int:
 	var n := 0
 	for c in corridors(bp):
@@ -739,55 +903,164 @@ static func tri_count(bp: Dictionary) -> int:
 	return n
 
 
-static func _box(arr: Dictionary, p0: Vector3, p1: Vector3, wdt: float, hgt: float, col: Color, ext: float) -> void:
-	var f := p1 - p0
-	if f.length() < 1e-4:
+const PROFILE_STEPS := 3
+const DOOR_COLOR := Color(0.93, 0.96, 1.0)
+
+
+## Rounded-rectangle outline (position and normal in side / up space), 4 corners x (PROFILE_STEPS + 1) points.
+static func _profile(a: float, b: float) -> Array:
+	var rc := 0.34 * minf(a, b)
+	var centers := [Vector2(a - rc, b - rc), Vector2(-(a - rc), b - rc), Vector2(-(a - rc), -(b - rc)), Vector2(a - rc, -(b - rc))]
+	var out: Array = []
+	for k in 4:
+		for j in range(PROFILE_STEPS + 1):
+			var ang := deg_to_rad(90.0 * float(k) + 90.0 * float(j) / float(PROFILE_STEPS))
+			var nrm := Vector2(cos(ang), sin(ang))
+			out.append([(centers[k] as Vector2) + nrm * rc, nrm])
+	return out
+
+
+## One cross-section: [{v, n, ny}] around the corridor.
+static func _ring(p: Vector3, side: Vector3, up: Vector3, a: float, b: float) -> Array:
+	var out: Array = []
+	for q in _profile(a, b):
+		var pos: Vector2 = q[0]
+		var nrm: Vector2 = q[1]
+		out.append({"v": p + side * pos.x + up * pos.y, "n": (side * nrm.x + up * nrm.y).normalized(), "ny": nrm.y})
+	return out
+
+
+static func _shade(base: Color, ny: float) -> Color:
+	# lighter ceiling strip, darker floor
+	if ny > 0.0:
+		return base.lerp(Color(1, 1, 1), 0.30 * ny * ny)
+	return base.darkened(0.34 * ny * ny)
+
+
+static func _emit(arr: Dictionary, v0: Vector3, v1: Vector3, v2: Vector3, n0: Vector3, n1: Vector3, n2: Vector3, c0: Color, c1: Color, c2: Color) -> void:
+	var cr := (v1 - v0).cross(v2 - v0)
+	if cr.length_squared() < 1e-12:
 		return
-	var fn := f.normalized()
-	var ref := Vector3.UP if absf(fn.y) < 0.95 else Vector3.RIGHT
-	var side := fn.cross(ref).normalized()
-	var up := side.cross(fn).normalized()
-	var a := p0 - fn * ext
-	var b := p1 + fn * ext
-	var hs := side * wdt * 0.5
-	var hu := up * hgt * 0.5
-	var v := [a - hs - hu, a + hs - hu, a + hs + hu, a - hs + hu, b - hs - hu, b + hs - hu, b + hs + hu, b - hs + hu]
-	var faces := [[0, 3, 2, 1, -fn], [4, 5, 6, 7, fn], [0, 1, 5, 4, -up], [3, 7, 6, 2, up], [0, 4, 7, 3, -side], [1, 2, 6, 5, side]]
-	for fc in faces:
-		var n: Vector3 = fc[4]
-		for idx in [0, 1, 2, 0, 2, 3]:
-			(arr["v"] as Array).append(v[fc[idx]])
-			(arr["n"] as Array).append(n)
-			(arr["c"] as Array).append(col)
+	if cr.dot(n0 + n1 + n2) > 0.0:   # front faces are clockwise in Godot: put the visible side outwards
+		var tv := v1
+		v1 = v2
+		v2 = tv
+		var tn := n1
+		n1 = n2
+		n2 = tn
+		var tc := c1
+		c1 = c2
+		c2 = tc
+	(arr["v"] as Array).append_array([v0, v1, v2])
+	(arr["n"] as Array).append_array([n0, n1, n2])
+	(arr["c"] as Array).append_array([c0, c1, c2])
 
 
-## Triangle mesh of every corridor (vertex colours by segment kind, doors in white). The selected corridor is brightened.
+## Skin between two cross-sections.
+static func _strip(arr: Dictionary, r0: Array, r1: Array, col0: Color, col1: Color, shade := true) -> void:
+	var k_n := r0.size()
+	for k in range(k_n):
+		var k2 := (k + 1) % k_n
+		var c00 := _shade(col0, float(r0[k]["ny"])) if shade else col0
+		var c01 := _shade(col0, float(r0[k2]["ny"])) if shade else col0
+		var c10 := _shade(col1, float(r1[k]["ny"])) if shade else col1
+		var c11 := _shade(col1, float(r1[k2]["ny"])) if shade else col1
+		_emit(arr, r0[k]["v"], r1[k]["v"], r1[k2]["v"], r0[k]["n"], r1[k]["n"], r1[k2]["n"], c00, c10, c11)
+		_emit(arr, r0[k]["v"], r1[k2]["v"], r0[k2]["v"], r0[k]["n"], r1[k2]["n"], r0[k2]["n"], c00, c11, c01)
+
+
+## Flat ring between an inner and an outer outline (the face of a door frame), facing `nrm`.
+static func _annulus(arr: Dictionary, inner: Array, outer: Array, nrm: Vector3, col: Color) -> void:
+	var k_n := inner.size()
+	for k in range(k_n):
+		var k2 := (k + 1) % k_n
+		_emit(arr, inner[k]["v"], outer[k]["v"], outer[k2]["v"], nrm, nrm, nrm, col, col, col)
+		_emit(arr, inner[k]["v"], outer[k2]["v"], inner[k2]["v"], nrm, nrm, nrm, col, col, col)
+
+
+## A frame (door, or the collar at an entrance) around the tube at a cross-section.
+static func _collar(arr: Dictionary, s: Dictionary, half: float, grow: float, col: Color) -> void:
+	var t: Vector3 = s["t"]
+	var p: Vector3 = s["p"]
+	var a := float(s["a"])
+	var b := float(s["b"])
+	var in0 := _ring(p - t * half, s["side"], s["up"], a, b)
+	var in1 := _ring(p + t * half, s["side"], s["up"], a, b)
+	var out0 := _ring(p - t * half, s["side"], s["up"], a + grow, b + grow)
+	var out1 := _ring(p + t * half, s["side"], s["up"], a + grow, b + grow)
+	_strip(arr, out0, out1, col, col, false)
+	_annulus(arr, in0, out0, -t, col)
+	_annulus(arr, in1, out1, t, col)
+
+
+## The cross-sections to draw: one per sample, plus ribs along stairs and rungs along ladders.
+static func _draw_rings(S: Array, w0: float) -> Array:
+	var out: Array = []
+	for i in range(S.size()):
+		var s0: Dictionary = S[i]
+		if i == S.size() - 1:
+			out.append({"s": s0, "k": 1.0})
+			break
+		var s1: Dictionary = S[i + 1]
+		var kind := int(s0["kind"])
+		if (kind == 2 or kind == 3) and int(s0["seg"]) == int(s1["seg"]):
+			var period := (0.55 if kind == 2 else 0.30) * w0
+			var cnt := maxi(int(round((s0["p"] as Vector3).distance_to(s1["p"]) / (period * 0.5))), 2)
+			if cnt % 2 == 1:
+				cnt += 1
+			for j in range(cnt):
+				var f := float(j) / float(cnt)
+				var mid := {"p": (s0["p"] as Vector3).lerp(s1["p"], f), "side": (s0["side"] as Vector3).lerp(s1["side"], f).normalized(), "up": (s0["up"] as Vector3).lerp(s1["up"], f).normalized(), "t": (s0["t"] as Vector3).lerp(s1["t"], f).normalized(), "a": lerpf(float(s0["a"]), float(s1["a"]), f), "b": lerpf(float(s0["b"]), float(s1["b"]), f), "kind": kind, "seg": s0["seg"]}
+				out.append({"s": mid, "k": 1.0 + ((0.06 if kind == 2 else 0.13) if j % 2 == 1 else 0.0)})
+		else:
+			out.append({"s": s0, "k": 1.0})
+	return out
+
+
+## Triangle mesh of every corridor: a smooth tube with rounded corners, door frames, ribs on stairs, rungs on ladders.
+## The selected corridor (and segment) is brightened.
 static func build_mesh(bp: Dictionary, sel_cor := -1, sel_seg := -1) -> ArrayMesh:
 	var arr := {"v": [], "n": [], "c": []}
 	var w0 := base_width(bp)
 	for c in corridors(bp):
-		var poly := polyline(bp, c)
+		var S := tube_samples(bp, c)
+		if S.size() < 2:
+			continue
 		var sel := int(c["id"]) == sel_cor
-		for i in range(poly.size() - 1):
-			var k := seg_kind(poly[i], poly[i + 1])
-			var f: float = float((c["w"] as Array)[i]) if i < (c["w"] as Array).size() else 1.0
-			var wdt := w0 * f
-			var hgt := w0 * (1.5 if f <= 1.5 else 1.9)
-			if k == 3:
-				wdt = w0 * 0.7
-				hgt = w0 * 0.7
-			var col: Color = KIND_COLORS[k]
+		var rings := _draw_rings(S, w0)
+		var prev: Array = []
+		var prev_col := Color.WHITE
+		for r in rings:
+			var s: Dictionary = r["s"]
+			var kk := float(r["k"])
+			var ring := _ring(s["p"], s["side"], s["up"], float(s["a"]) * kk, float(s["b"]) * kk)
+			var col: Color = KIND_COLORS[int(s["kind"])]
 			if sel:
-				col = col.lerp(Color.WHITE, 0.45 if (sel_seg < 0 or sel_seg == i) else 0.15)
-			_box(arr, poly[i], poly[i + 1], wdt, hgt, col, wdt * 0.25 if i > 0 and i < poly.size() - 2 else 0.0)
+				col = col.lerp(Color.WHITE, 0.5 if (sel_seg < 0 or sel_seg == int(s["seg"])) else 0.16)
+			if not prev.is_empty():
+				_strip(arr, prev, ring, prev_col, col)
+			prev = ring
+			prev_col = col
+		# frames: one at each entrance and one for every door
+		_collar(arr, S[0], w0 * 0.09, w0 * 0.09, Color(0.78, 0.82, 0.9))
+		var last: Dictionary = (S[S.size() - 1] as Dictionary).duplicate()
+		last["t"] = -(last["t"] as Vector3)
+		last["side"] = -(last["side"] as Vector3)
+		_collar(arr, last, w0 * 0.09, w0 * 0.09, Color(0.78, 0.82, 0.9))
+		var raw := polyline(bp, c)
 		for d in c["doors"]:
 			var si := int(d[0])
-			if si < 0 or si >= poly.size() - 1:
+			if si < 0 or si >= raw.size() - 1:
 				continue
-			var pos := poly[si].lerp(poly[si + 1], float(d[1]))
-			var dir := (poly[si + 1] - poly[si]).normalized()
-			var wd := w0 * float((c["w"] as Array)[si] if si < (c["w"] as Array).size() else 1.0)
-			_box(arr, pos - dir * w0 * 0.07, pos + dir * w0 * 0.07, wd * 1.08, w0 * (1.6 if wd <= w0 * 1.5 else 2.0), Color(0.92, 0.95, 1.0), 0.0)
+			var want := (raw[si] as Vector3).lerp(raw[si + 1], float(d[1]))
+			var best := 0
+			var bd := INF
+			for j in range(S.size()):
+				var dd := (S[j]["p"] as Vector3).distance_to(want)
+				if dd < bd:
+					bd = dd
+					best = j
+			_collar(arr, S[best], w0 * 0.07, w0 * 0.07, DOOR_COLOR)
 	var mesh := ArrayMesh.new()
 	if (arr["v"] as Array).is_empty():
 		return mesh

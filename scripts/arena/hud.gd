@@ -39,6 +39,7 @@ var overlay: Control
 var radar: Control
 var preview: ShipPreview
 var p1: ConsolePanel
+var gauges_box: HBoxContainer
 var _p1_anchors := Vector4.ZERO
 var sub_panel: ConsolePanel
 var sub_body: VBoxContainer
@@ -265,7 +266,7 @@ class SegBar extends Control:
 			var lit := float(i) / float(cells) < value - 0.001
 			var y := h - float(i + 1) * ch
 			draw_rect(Rect2(2, y + 1.0, size.x - 4, ch - 1.5), lit_col if lit else Color(0.14, 0.07, 0.05))
-		Hud.outlined(self, label, Vector2(0, size.y - 1), 8, AMBER, size.x, HORIZONTAL_ALIGNMENT_CENTER)
+		Hud.outlined(self, label, Vector2(0, size.y - 1), 6, AMBER, size.x, HORIZONTAL_ALIGNMENT_CENTER)
 
 
 class Overlay extends Control:
@@ -670,7 +671,7 @@ func _seg(label: String, parent: Control, col: Color) -> SegBar:
 	var b := SegBar.new()
 	b.label = label
 	b.col = col
-	b.custom_minimum_size = Vector2(22, 100)
+	b.custom_minimum_size = Vector2(13, 100)
 	parent.add_child(b)
 	return b
 
@@ -767,7 +768,7 @@ func setup(a) -> void:
 	btn_giveup.visible = false
 
 	# Panel 1: 3D ship model (Basic / Exploded / Onion tabs) + gauges + telemetry
-	p1 = _rect_panel("SHIP STATUS", 1205, 653, 327, 247)
+	p1 = _rect_panel("SHIP STATUS", 1150, 585, 385, 315)
 	p1.set_tabs(ShipPreview.TABS)
 	p1.tab_changed.connect(func(i: int): preview.set_view(i))
 	var hb1 := HBoxContainer.new()
@@ -780,8 +781,9 @@ func setup(a) -> void:
 	preview.expand_requested.connect(_expand_p1)
 	hb1.add_child(preview)
 	var gauges := HBoxContainer.new()
-	gauges.add_theme_constant_override("separation", 2)
+	gauges.add_theme_constant_override("separation", 1)
 	hb1.add_child(gauges)
+	gauges_box = gauges
 	bar_hull = _seg("HUL", gauges, Color(0.95, 0.5, 0.1))
 	bar_hull.warn = true
 	bar_power = _seg("PWR", gauges, BLUE)
@@ -846,15 +848,16 @@ func setup(a) -> void:
 func _expand_p1(on: bool) -> void:
 	if on:
 		_p1_anchors = Vector4(p1.anchor_left, p1.anchor_top, p1.anchor_right, p1.anchor_bottom)
-		p1.anchor_left = 1000.0 / 1600.0
-		p1.anchor_right = 1590.0 / 1600.0
-		p1.anchor_top = 410.0 / 900.0
+		p1.anchor_left = 840.0 / 1600.0
+		p1.anchor_right = 1592.0 / 1600.0
+		p1.anchor_top = 290.0 / 900.0
 		p1.anchor_bottom = 1.0
 	else:
 		p1.anchor_left = _p1_anchors.x
 		p1.anchor_top = _p1_anchors.y
 		p1.anchor_right = _p1_anchors.z
 		p1.anchor_bottom = _p1_anchors.w
+	gauges_box.visible = not on          # the inspector is all 3D ship; the gauges are for the small panel
 	p1.move_to_front()
 
 
