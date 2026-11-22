@@ -91,6 +91,7 @@ func save_ship(bp: Dictionary, dir := USER_SHIPS) -> String:
 		clean += c if (c >= "a" and c <= "z") or (c >= "0" and c <= "9") else "_"
 	if clean == "":
 		clean = "ship"
+	DirAccess.make_dir_recursive_absolute(dir)
 	var path := "%s/%s.json" % [dir, clean]
 	var f := FileAccess.open(path, FileAccess.WRITE)
 	if f == null:

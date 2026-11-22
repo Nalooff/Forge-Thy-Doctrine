@@ -38,6 +38,8 @@ var root: Control
 var overlay: Control
 var radar: Control
 var preview: ShipPreview
+var p1: ConsolePanel
+var _p1_anchors := Vector4.ZERO
 var sub_panel: ConsolePanel
 var sub_body: VBoxContainer
 var sub_text: RichTextLabel
@@ -262,129 +264,6 @@ class SegBar extends Control:
 			var y := h - float(i + 1) * ch
 			draw_rect(Rect2(2, y + 1.0, size.x - 4, ch - 1.5), lit_col if lit else Color(0.14, 0.07, 0.05))
 		Hud.outlined(self, label, Vector2(0, size.y - 1), 8, AMBER, size.x, HORIZONTAL_ALIGNMENT_CENTER)
-
-
-class ShipPreview extends Control:
-	var ship: Ship
-	var view := 0            # 0 basic 3D, 1 exploded, 2 onion slice
-	var vp: SubViewport
-	var root3: Node3D
-	var cam: Camera3D
-	var hull_mi: MeshInstance3D
-	var hull_mat: StandardMaterial3D
-	var nodes: Array = []
-	var yaw := 0.7
-	var pitch := -0.35
-	var dragging := false
-	var _t := 0.0
-	var center := Vector3.ZERO
-	var longest := 10.0
-
-	func _init() -> void:
-		mouse_filter = Control.MOUSE_FILTER_STOP
-		custom_minimum_size = Vector2(108, 100)
-		var svc := SubViewportContainer.new()
-		svc.stretch = true
-		svc.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		svc.set_anchors_preset(Control.PRESET_FULL_RECT)
-		add_child(svc)
-		vp = SubViewport.new()
-		vp.own_world_3d = true
-		vp.transparent_bg = true
-		vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
-		svc.add_child(vp)
-		root3 = Node3D.new()
-		vp.add_child(root3)
-		var env := Environment.new()
-		env.background_mode = Environment.BG_CLEAR_COLOR
-		env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-		env.ambient_light_color = Color(0.6, 0.55, 0.5)
-		env.ambient_light_energy = 0.8
-		var we := WorldEnvironment.new()
-		we.environment = env
-		root3.add_child(we)
-		var sun := DirectionalLight3D.new()
-		sun.rotation_degrees = Vector3(-35, 35, 0)
-		root3.add_child(sun)
-		cam = Camera3D.new()
-		cam.fov = 34.0
-		root3.add_child(cam)
-
-	func bind(s: Ship) -> void:
-		ship = s
-		for c in root3.get_children():
-			if c is MeshInstance3D:
-				c.queue_free()
-		nodes.clear()
-		hull_mat = StandardMaterial3D.new()
-		hull_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		hull_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-		hull_mat.roughness = 0.6
-		hull_mi = MeshInstance3D.new()
-		hull_mi.mesh = ShipData.build_hull_mesh(s.bp["rings"])
-		hull_mi.material_override = hull_mat
-		root3.add_child(hull_mi)
-		for m in s.mods:
-			var mi := MeshInstance3D.new()
-			var bm := BoxMesh.new()
-			bm.size = m["size"]
-			mi.mesh = bm
-			var mat := StandardMaterial3D.new()
-			mat.emission_enabled = true
-			mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-			mi.material_override = mat
-			root3.add_child(mi)
-			nodes.append({"m": m, "mi": mi, "mat": mat})
-		center = s.stats["com"]
-		longest = maxf(float(s.stats["longest"]), 2.0)
-		refresh()
-
-	func refresh() -> void:
-		if ship == null or not is_instance_valid(ship):
-			return
-		var integrity := ship.hull_hp / ship.hull_hp_max
-		var hc := Color(0.5, 0.46, 0.44).lerp(Color(0.2, 0.08, 0.06), 1.0 - integrity)
-		hc.a = [0.92, 0.22, 0.14][view]
-		hull_mat.albedo_color = hc
-		for n in nodes:
-			var m: Dictionary = n["m"]
-			var mi: MeshInstance3D = n["mi"]
-			var f := float(m["hp"]) / float(m["max"])
-			var col := Color(1.0, 0.72, 0.25).lerp(Color(0.85, 0.08, 0.04), 1.0 - f)
-			if not m["alive"]:
-				col = Color(0.06, 0.05, 0.05)
-			var mat: StandardMaterial3D = n["mat"]
-			mat.albedo_color = col
-			mat.emission = col * 0.45
-			var p: Vector3 = m["pos"]
-			if view == 1:
-				p = center + (p - center) * 1.9
-			mi.position = p
-			mi.visible = (m["kind"] == "external") or view != 0
-
-	func _process(delta: float) -> void:
-		if ship == null or not is_instance_valid(ship):
-			return
-		_t += delta
-		if not dragging:
-			yaw += delta * 0.35
-		var dist := longest * (2.6 if view == 1 else 1.9)
-		var off := Vector3(0, 0, dist).rotated(Vector3.RIGHT, pitch).rotated(Vector3.UP, yaw)
-		cam.look_at_from_position(center + off, center, Vector3.UP)
-		cam.near = maxf(longest * 0.02, 0.05)
-		cam.far = longest * 20.0
-		if _t > 0.25:
-			_t = 0.0
-			refresh()
-
-	func _gui_input(event: InputEvent) -> void:
-		if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
-			dragging = event.pressed
-			accept_event()
-		elif event is InputEventMouseMotion and dragging:
-			yaw -= event.relative.x * 0.01
-			pitch = clampf(pitch - event.relative.y * 0.01, -1.4, 1.4)
-			accept_event()
 
 
 class Overlay extends Control:
@@ -886,14 +765,17 @@ func setup(a) -> void:
 	btn_giveup.visible = false
 
 	# Panel 1: 3D ship model (Basic / Exploded / Onion tabs) + gauges + telemetry
-	var p1 := _rect_panel("SHIP STATUS", 1205, 653, 327, 247)
-	p1.set_tabs(["Basic 3D", "Exploded", "Onion"])
-	p1.tab_changed.connect(func(i: int): preview.view = i; preview.refresh())
+	p1 = _rect_panel("SHIP STATUS", 1205, 653, 327, 247)
+	p1.set_tabs(ShipPreview.TABS)
+	p1.tab_changed.connect(func(i: int): preview.set_view(i))
 	var hb1 := HBoxContainer.new()
 	hb1.add_theme_constant_override("separation", 4)
+	hb1.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	p1.body.add_child(hb1)
 	preview = ShipPreview.new()
 	preview.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	preview.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	preview.expand_requested.connect(_expand_p1)
 	hb1.add_child(preview)
 	var gauges := HBoxContainer.new()
 	gauges.add_theme_constant_override("separation", 2)
@@ -955,6 +837,22 @@ func setup(a) -> void:
 	_build_respawn()
 	_build_pause()
 	_refresh_mode_label()
+
+
+## Panel 1 can grow into an inspector: more room for the hover card, the exploded spread and the deck slices.
+func _expand_p1(on: bool) -> void:
+	if on:
+		_p1_anchors = Vector4(p1.anchor_left, p1.anchor_top, p1.anchor_right, p1.anchor_bottom)
+		p1.anchor_left = 1000.0 / 1600.0
+		p1.anchor_right = 1590.0 / 1600.0
+		p1.anchor_top = 410.0 / 900.0
+		p1.anchor_bottom = 1.0
+	else:
+		p1.anchor_left = _p1_anchors.x
+		p1.anchor_top = _p1_anchors.y
+		p1.anchor_right = _p1_anchors.z
+		p1.anchor_bottom = _p1_anchors.w
+	p1.move_to_front()
 
 
 func _p5_tab(show_log: bool) -> void:
