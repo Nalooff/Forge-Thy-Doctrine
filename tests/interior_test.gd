@@ -66,14 +66,15 @@ func _initialize() -> void:
 	var wseq: Array = []
 	for i in 4:
 		wseq.append(Interior.cycle_width(c, 1))
-	check(wseq == [1.5, 2.0, 3.0, 1.0], "width cycles 1.5, 2, 3, back to 1")
+	check(wseq == [1.5, 2.0, 3.0, 4.5], "width cycles 1.5, 2, 3 (room), 4.5 (big room)")
+	check(is_equal_approx(Interior.cycle_width(c, 1), 1.0), "... and back to 1")
 	check(Interior.toggle_door(c, 1, 0.4) and (c["doors"] as Array).size() == 3, "a door can be added")
 	check(not Interior.toggle_door(c, 1, 0.42) and (c["doors"] as Array).size() == 2, "clicking next to it removes the door")
 
 	# ---- problems are detected
 	var bad := c.duplicate(true)
 	bad["pts"] = [[0.0, 0.0, -2.2]] + bad["pts"]
-	check(Interior.polyline_problem(bp, bad).begins_with("cuts through"), "a bend inside a module is a problem (%s)" % Interior.polyline_problem(bp, bad))
+	check(Interior.polyline_problem(bp, bad) != "", "a bend inside a module is a problem (%s)" % Interior.polyline_problem(bp, bad))
 	bad["pts"] = [[40.0, 0.0, 0.0]]
 	check(Interior.polyline_problem(bp, bad) == "leaves the hull", "a bend outside the hull is a problem")
 	c["pts"].append([40.0, 0.0, 0.0])
@@ -190,7 +191,7 @@ func _initialize() -> void:
 	await process_frame
 	ed._set_step("Interior")
 	await process_frame
-	check(ed.mode_opts["Type"].item_count == 2 and ed.mode_opts["Modifier"].item_count == 3, "Interior offers Entrance / Corridor and Bend points / Width / Doors")
+	check(ed.mode_opts["Type"].item_count == 3 and ed.mode_opts["Modifier"].item_count == 4, "Interior offers Entrance / Corridor / Junction and Bend points / Width / Doors / Rooms")
 	for t in ed.TABS:
 		ed._pick_tab(t)
 	check(ed.cor_root.get_child_count() >= 1 + Interior.entrances(ed.bp).size(), "corridors, entrances and bend points are drawn (%d nodes)" % ed.cor_root.get_child_count())

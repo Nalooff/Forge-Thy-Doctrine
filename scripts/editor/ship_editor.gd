@@ -15,7 +15,7 @@ const MODES := {
 	"Hull": {"Type": ["Vertex", "Ring"], "Modifier": ["Mirror", "Soft select", "Thickness"], "Helper": HELPERS},
 	"Modules": {"Type": ["Module"], "Modifier": ["Auto-hull"], "Helper": HELPERS},
 	"Links": {"Type": ["Link"], "Modifier": ["Auto-link"], "Helper": HELPERS},
-	"Interior": {"Type": ["Entrance", "Corridor"], "Modifier": ["Bend points", "Width", "Doors"], "Helper": HELPERS},
+	"Interior": {"Type": ["Entrance", "Corridor", "Junction"], "Modifier": ["Bend points", "Width", "Doors", "Rooms"], "Helper": HELPERS},
 	"Cosmetics": {"Type": ["Paint"], "Modifier": ["None"], "Helper": HELPERS},
 	"Test": {"Type": ["Test range"], "Modifier": ["None"], "Helper": HELPERS},
 }
@@ -29,6 +29,8 @@ var sel_mod := -1
 var link_from := -1
 var sel_ent := -1           # Interior: selected entrance / corridor / bend point / segment, first entrance of a new corridor
 var sel_cor := -1
+var sel_node := -1          # Interior: selected junction / room
+var drag_node := false
 var sel_bend := -1
 var sel_seg := -1
 var cor_from := -1
@@ -115,6 +117,7 @@ func _after_load() -> void:
 	link_from = -1
 	sel_ent = -1
 	sel_cor = -1
+	sel_node = -1
 	sel_bend = -1
 	sel_seg = -1
 	cor_from = -1
@@ -660,6 +663,7 @@ func _set_step(s: String) -> void:
 	step = s
 	link_from = -1
 	cor_from = -1
+	sel_node = -1
 	sel_ent = -1
 	sel_cor = -1
 	sel_bend = -1
@@ -670,7 +674,7 @@ func _set_step(s: String) -> void:
 		"Hull": "LMB on a vertex: select/drag (mirror keeps symmetry). Arrows = X/Y, PageUp/PageDown = ring Z. RMB orbit, MMB/Shift+RMB pan, wheel zoom. Ctrl+Z undo.",
 		"Modules": "LMB a module to select and drag it (camera plane). Arrows/PageUp/PageDown nudge. Red outline = minimum size. White line = facing.",
 		"Links": "LMB module A, then module B to link: Commander Post -> Engine/Turret Control/Turret Bay/Radar, Engine -> Thruster, Turret Bay -> touching Barrel (turns it), Turret Control -> any Barrel (fixed).",
-		"Interior": "Entrance: click a module face.  Corridor: click entrance A, then B.  Click a corridor to use the Modifier (bend points / width / doors).  Del removes.",
+		"Interior": "Entrance: click a module face.  Corridor: click an end (entrance / junction), then another end or ANY corridor (T-piece, 4-way).  Junction: click a corridor.  Entrance + Modifier: edit a corridor.  Del removes.",
 		"Cosmetics": "Colors only in this prototype. Stowage props and decals: later roadmap.",
 		"Test": "Launch the solo test range: place a dummy, shoot your own hull, test flight.",
 	}
@@ -749,6 +753,8 @@ func _tools_modifier(v: String) -> void:
 			_btn("Re-route selected", tools, _reroute_selected)
 		"Width":
 			_lbl("Click a corridor segment to widen it:\nx1 -> x1.5 -> x2 -> x3 (a room) -> x1.\nA wide part must still fit in the hull.", tools, 11)
+		"Rooms":
+			_lbl("Click a corridor to put a room there, or click\na junction / room to step through its sizes.\nThe Width modifier also turns a corridor part\ninto a long room (x3 and x4.5).", tools, 11)
 		"Doors":
 			_lbl("Click a corridor to place a door.\nClick near an existing door to remove it.\nEvery new corridor starts with a door at\neach end.", tools, 11)
 		"Auto-link":
@@ -1378,6 +1384,8 @@ func _rebuild_lines() -> void:
 	_line(Vector3.ZERO, Vector3(0, L * 0.15, 0), Color.GREEN)
 	_line(Vector3.ZERO, Vector3(0, 0, -L * 0.15), Color(0.4, 0.5, 1.0))
 	if step == "Interior":
+		for nd in Interior.nodes(bp):
+			_box_lines(Interior.node_pos(nd), Interior.node_size(nd), Color(0.55, 0.8, 1.0) if Interior.is_room(bp, nd) else Color(0.75, 0.6, 1.0))
 		for m in bp["modules"]:
 			_box_lines(ShipData.v3(m["pos"]), ShipData.v3(m["size"]), _type_color(m["type"]).lightened(0.2))
 	if step in ["Modules", "Links"]:
@@ -1415,7 +1423,7 @@ func _update_stats() -> void:
 	t += "Heat  idle %d%%   hard use [color=%s]%d%%[/color] of critical\n" % [int(st["heat_idle"]), "#6f6" if hh < 70.0 else ("#fb4" if hh < 100.0 else "#f66"), int(hh)]
 	var ist := Interior.stats(bp)
 	if int(ist["count"]) > 0:
-		t += "Interior  %d corridors, %.0f m, %d doors, %d stairs, %d ladders\n" % [ist["count"], ist["length"], ist["doors"], ist["stairs"], ist["ladders"]]
+		t += "Interior  %d corridors, %.0f m, %d doors, %d stairs, %d ladders, %d junctions, %d rooms\n" % [ist["count"], ist["length"], ist["doors"], ist["stairs"], ist["ladders"], ist["junctions"], ist["rooms"]]
 	var tri_ok := int(st["tris"]) <= int(st["tri_budget"])
 	t += "Polys [color=%s]%d / %d[/color]\n" % ["#6f6" if tri_ok else "#f66", st["tris"], st["tri_budget"]]
 	if not ok:
@@ -1439,12 +1447,12 @@ func _ent_label(id: int) -> String:
 
 
 func _cor_label(c: Dictionary) -> String:
-	return "#%d  %s > %s   %.0f m" % [int(c["id"]), _ent_label(int(c["a"])), _ent_label(int(c["b"])), Interior.length(bp, c)]
+	return "#%d  %s > %s   %.0f m" % [int(c["id"]), _end_label(int(c["a"])), _end_label(int(c["b"])), Interior.length(bp, c)]
 
 
 func _tools_interior() -> void:
 	var st := Interior.stats(bp)
-	_lbl("Corridor width %.2f m\n%d entrance(s), %d corridor(s), %.0f m\n%d stairs, %d ladders, %d doors" % [Interior.base_width(bp), st["entrances"], st["count"], st["length"], st["stairs"], st["ladders"], st["doors"]], tools, 12)
+	_lbl("Corridor width %.2f m\n%d entrance(s), %d corridor(s), %.0f m\n%d stairs, %d ladders, %d doors\n%d junction(s), %d room(s)" % [Interior.base_width(bp), st["entrances"], st["count"], st["length"], st["stairs"], st["ladders"], st["doors"], st["junctions"], st["rooms"]], tools, 12)
 	_btn("Auto-connect all", tools, func():
 		_push_undo()
 		var n := Interior.auto_connect(bp)
@@ -1459,6 +1467,22 @@ func _tools_interior() -> void:
 		sel_bend = -1
 		_changed()
 		_build_tools())
+	if sel_node >= 0 and not Interior.node(bp, sel_node).is_empty():
+		var nd := Interior.node(bp, sel_node)
+		var sz := Interior.node_size(nd)
+		_lbl("%s #%d   %.1f x %.1f x %.1f m\n%d corridor(s) end here" % [Interior.node_label(bp, nd), sel_node, sz.x, sz.y, sz.z, Interior.node_degree(bp, sel_node)], tools, 12)
+		for row in [["Width", 0], ["Height", 1], ["Length", 2]]:
+			var hb := HBoxContainer.new()
+			tools.add_child(hb)
+			var rl := Label.new()
+			rl.text = String(row[0])
+			rl.custom_minimum_size = Vector2(64, 0)
+			hb.add_child(rl)
+			var axis: int = row[1]
+			_btn("-", hb, func(): _resize_node(axis, -1.0))
+			_btn("+", hb, func(): _resize_node(axis, 1.0))
+		_btn("Next room size", tools, func(): _cycle_room())
+		_btn("Delete junction / room", tools, _delete_interior)
 	if sel_ent >= 0 and not Interior.entrance(bp, sel_ent).is_empty():
 		_lbl("Selected entrance: %s" % _ent_label(sel_ent), tools, 12)
 		_btn("Delete entrance", tools, _delete_interior)
@@ -1496,6 +1520,11 @@ func _delete_interior() -> void:
 			_push_undo()
 			Interior.remove_bend(bp, c, sel_bend)
 			sel_bend = -1
+	elif sel_node >= 0:
+		_push_undo()
+		Interior.remove_node(bp, sel_node)
+		sel_node = -1
+		sel_cor = -1
 	elif sel_cor >= 0:
 		_push_undo()
 		Interior.remove_corridor(bp, sel_cor)
@@ -1539,7 +1568,7 @@ func _rebuild_interior() -> void:
 	if step != "Interior":
 		return
 	var mi := MeshInstance3D.new()
-	mi.mesh = Interior.build_mesh(bp, sel_cor, sel_seg)
+	mi.mesh = Interior.build_mesh(bp, sel_cor, sel_seg, sel_node)
 	var mat := StandardMaterial3D.new()
 	mat.vertex_color_use_as_albedo = true
 	mat.roughness = 0.6
@@ -1559,6 +1588,14 @@ func _rebuild_interior() -> void:
 		elif eid == cor_from:
 			col = Color(0.3, 0.9, 1.0)
 		cor_root.add_child(_marker(sm, Interior.entrance_pos(bp, e), col, 1.0))
+	for nd in Interior.nodes(bp):
+		var nid := int(nd["id"])
+		var ncol := Color(0.85, 0.6, 1.0)
+		if nid == sel_node:
+			ncol = Color(1.0, 1.0, 0.2)
+		elif nid == cor_from:
+			ncol = Color(0.3, 0.9, 1.0)
+		cor_root.add_child(_marker(sm, Interior.node_pos(nd), ncol, 1.15))
 	for c in Interior.corridors(bp):
 		var cid := int(c["id"])
 		var pts: Array = c["pts"]
@@ -1627,6 +1664,86 @@ func _module_hit() -> Dictionary:
 	return best
 
 
+func _end_label(id: int) -> String:
+	if not Interior.entrance(bp, id).is_empty():
+		return _ent_label(id)
+	var nd := Interior.node(bp, id)
+	if nd.is_empty():
+		return "?"
+	return "%s %d" % [Interior.node_label(bp, nd), id]
+
+
+func _pick_node() -> int:
+	var mp := get_viewport().get_mouse_position()
+	var best := -1
+	var bd := 16.0
+	for nd in Interior.nodes(bp):
+		var wp := Interior.node_pos(nd)
+		if cam.is_position_behind(wp):
+			continue
+		var d := cam.unproject_position(wp).distance_to(mp)
+		if d < bd:
+			bd = d
+			best = int(nd["id"])
+	return best
+
+
+func _move_node(id: int, np: Vector3) -> bool:
+	if Interior.move_node(bp, id, np):
+		_changed()
+		return true
+	return false
+
+
+func _resize_node(axis: int, dir: float) -> void:
+	var nd := Interior.node(bp, sel_node)
+	if nd.is_empty():
+		return
+	var sz := Interior.node_size(nd)
+	sz[axis] += dir * Interior.base_width(bp) * 0.25
+	_push_undo()
+	var r := Interior.set_node_size(bp, sel_node, sz)
+	if not bool(r["ok"]):
+		undo_stack.pop_back()
+		say(String(r["msg"]))
+		return
+	_changed()
+	_build_tools()
+
+
+func _cycle_room() -> void:
+	_push_undo()
+	var r := Interior.cycle_room(bp, sel_node)
+	if not bool(r["ok"]):
+		undo_stack.pop_back()
+		say(String(r["msg"]))
+		return
+	say("Room." if bool(r["room"]) else "Junction.")
+	_changed()
+	_build_tools()
+
+
+## A click on an end (entrance or junction) while the Corridor type is active.
+func _corridor_end_clicked(eid: int) -> void:
+	if cor_from < 0:
+		cor_from = eid
+		say("%s - now click another end, or any corridor to join it (T-piece / 4-way)." % _end_label(eid))
+	elif eid != cor_from:
+		_push_undo()
+		var r := Interior.add_corridor(bp, cor_from, eid)
+		if bool(r["ok"]):
+			sel_cor = int(r["id"])
+			sel_ent = -1
+			sel_node = -1
+			say("Corridor made.")
+		else:
+			undo_stack.pop_back()
+			say(String(r["msg"]))
+		cor_from = -1
+	else:
+		cor_from = -1
+
+
 func _click_interior() -> void:
 	var tv := _mode_value("Type")
 	var mv := _mode_value("Modifier")
@@ -1636,7 +1753,9 @@ func _click_interior() -> void:
 		sel_cor = hb.x
 		sel_bend = hb.y
 		sel_ent = -1
+		sel_node = -1
 		sel_seg = -1
+		drag_node = false
 		_push_undo()
 		var hit = _drag_hit()
 		if hit != null:
@@ -1646,29 +1765,38 @@ func _click_interior() -> void:
 		_build_tools()
 		_changed(false)
 		return
+	# 1b. a junction or room: link to it, resize it (Rooms), or select and drag it
+	var nd_hit := _pick_node()
+	if nd_hit >= 0:
+		sel_bend = -1
+		if tv == "Corridor":
+			_corridor_end_clicked(nd_hit)
+		else:
+			sel_node = nd_hit
+			sel_ent = -1
+			sel_cor = -1
+			if mv == "Rooms":
+				_cycle_room()
+			else:
+				_push_undo()
+				drag_node = true
+				var hit2 = _drag_hit()
+				if hit2 != null:
+					dragging = true
+					drag_start = hit2
+					drag_orig = Interior.node_pos(Interior.node(bp, nd_hit))
+		_build_tools()
+		_changed(false)
+		return
 	# 2. an entrance: select it, or start / finish a corridor
 	var ent := _pick_entrance()
 	if ent >= 0:
 		sel_bend = -1
 		if tv == "Corridor":
-			if cor_from < 0:
-				cor_from = ent
-				say("Entrance %s - now click the other entrance." % _ent_label(ent))
-			elif ent != cor_from:
-				_push_undo()
-				var r := Interior.add_corridor(bp, cor_from, ent)
-				if bool(r["ok"]):
-					sel_cor = int(r["id"])
-					sel_ent = -1
-					say("Corridor made.")
-				else:
-					undo_stack.pop_back()
-					say(String(r["msg"]))
-				cor_from = -1
-			else:
-				cor_from = -1
+			_corridor_end_clicked(ent)
 		else:
 			sel_ent = ent
+			sel_node = -1
 			sel_cor = -1
 		_build_tools()
 		_changed(false)
@@ -1684,6 +1812,43 @@ func _click_interior() -> void:
 		sel_ent = -1
 		sel_seg = seg
 		sel_bend = -1
+		sel_node = -1
+		if tv == "Corridor" or tv == "Junction" or mv == "Rooms":
+			_push_undo()
+			var sp := Interior.split_corridor(bp, int(c["id"]), seg, ch["pos"])
+			if not bool(sp["ok"]):
+				undo_stack.pop_back()
+				say(String(sp["msg"]))
+				_build_tools()
+				_changed(false)
+				return
+			var nid := int(sp["node"])
+			sel_node = nid
+			sel_cor = -1
+			if tv == "Corridor":
+				if cor_from < 0:
+					cor_from = nid
+					say("Junction placed - now click where the new corridor should start from (an entrance, a junction or another corridor).")
+				else:
+					var rj := Interior.add_corridor(bp, cor_from, nid)
+					if bool(rj["ok"]):
+						say("%s made." % Interior.node_label(bp, Interior.node(bp, nid)))
+						sel_cor = int(rj["id"])
+						sel_node = -1
+						cor_from = -1
+					else:
+						_undo()
+						say(String(rj["msg"]))
+						cor_from = -1
+						return
+			elif mv == "Rooms" and tv != "Junction":
+				var rc := Interior.cycle_room(bp, nid)
+				say("Room placed - click it again to change its size." if bool(rc.get("ok", false)) and bool(rc.get("room", false)) else "Junction placed.")
+			else:
+				say("Junction placed - join more corridors to it with Type Corridor.")
+			_build_tools()
+			_changed()
+			return
 		var backup := c.duplicate(true)
 		_push_undo()
 		match mv:
@@ -1790,9 +1955,13 @@ func _drag_hit() -> Variant:
 		var plane := Plane(Vector3(0, 0, 1), float(_ring(sel_ring)["z"]))
 		return plane.intersects_ray(o, d)
 	if step == "Interior":
+		var fwd0 := -cam.global_transform.basis.z
+		if drag_node:
+			if sel_node < 0:
+				return null
+			return Plane(fwd0, Interior.node_pos(Interior.node(bp, sel_node)).dot(fwd0)).intersects_ray(o, d)
 		if sel_cor < 0 or sel_bend < 0:
 			return null
-		var fwd0 := -cam.global_transform.basis.z
 		return Plane(fwd0, _bend_pos(sel_cor, sel_bend).dot(fwd0)).intersects_ray(o, d)
 	var m := ShipData.get_module(bp, sel_mod)
 	if m.is_empty():
@@ -1852,6 +2021,8 @@ func _do_drag() -> void:
 		else:
 			_move_ring_by(sel_ring, dx, dy)
 		_changed()
+	elif step == "Interior" and drag_node and sel_node >= 0:
+		_move_node(sel_node, Vector3(_snapv(drag_orig.x + h.x - drag_start.x), _snapv(drag_orig.y + h.y - drag_start.y), _snapv(drag_orig.z + h.z - drag_start.z)))
 	elif step == "Interior" and sel_cor >= 0 and sel_bend >= 0:
 		_move_bend(sel_cor, sel_bend, Vector3(_snapv(drag_orig.x + h.x - drag_start.x), _snapv(drag_orig.y + h.y - drag_start.y), _snapv(drag_orig.z + h.z - drag_start.z)))
 	elif step == "Modules" and sel_mod >= 0:
@@ -1983,4 +2154,6 @@ func _nudge(k: InputEvent) -> void:
 		_changed()
 	elif step == "Interior" and sel_cor >= 0 and sel_bend >= 0:
 		_move_bend(sel_cor, sel_bend, _bend_pos(sel_cor, sel_bend) + d)
+	elif step == "Interior" and sel_node >= 0:
+		_move_node(sel_node, Interior.node_pos(Interior.node(bp, sel_node)) + d)
 	get_viewport().set_input_as_handled()

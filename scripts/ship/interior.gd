@@ -3,9 +3,12 @@ extends RefCounted
 ## Step 4 of the Ship Forge (GDD "Module Link / Interior"): entrances on the internal modules and the
 ## corridors that join them.
 ##
+## The interior is a network. Corridors join two ENDS: an entrance on a module, or a NODE placed in the hull.
+## A node with three or four corridors is a T-piece or a 4-way; a node made bigger is a room.
 ## Data lives in bp["interior"]:
 ##   entrances: [{id, module, face (0..5, ShipData.DIRS), u, v (-1..1 across the face)}]
-##   corridors: [{id, a, b (entrance ids), pts (bend points, world/ship space), w (width factor per segment),
+##   nodes: [{id, pos, size}]   (junctions and rooms, ids share the same counter as entrances and corridors)
+##   corridors: [{id, a, b (entrance or node ids), pts (bend points, world/ship space), w (width factor per segment),
 ##                doors [[segment, t], ...]}]
 ## The full path of a corridor is  entrance A, its stub, the bend points, the stub of B, entrance B  (see polyline()).
 ## A path must stay inside the hull and may not cut through modules. A steep segment becomes a slope, then
@@ -13,7 +16,11 @@ extends RefCounted
 
 const KIND_NAMES := ["Corridor", "Slope", "Stairs", "Ladder"]
 const KIND_COLORS := [Color(0.35, 0.8, 0.85), Color(0.95, 0.85, 0.3), Color(1.0, 0.55, 0.15), Color(0.95, 0.25, 0.2)]
-const WIDTHS := [1.0, 1.5, 2.0, 3.0]          # width factors a segment can be widened to (3 = a room)
+const WIDTHS := [1.0, 1.5, 2.0, 3.0, 4.5]     # width factors a corridor part can be widened to (3 and 4.5 are rooms)
+const ROOM_WF := 3.0                          # from this width factor a widened part counts as a room
+const ROOM_PRESETS := [Vector3(2.4, 1.8, 2.4), Vector3(3.6, 2.1, 3.6), Vector3(5.2, 2.5, 5.2), Vector3(7.5, 2.8, 5.2)]   # room sizes in corridor widths
+const JUNCTION_COLOR := Color(0.62, 0.70, 0.80)
+const ROOM_COLOR := Color(0.46, 0.76, 0.95)
 const SLOPE_DEG := 12.0
 const STAIRS_DEG := 32.0
 const LADDER_DEG := 58.0
@@ -23,7 +30,9 @@ const MAX_CELLS := 30000
 # ================================================================== data
 static func ensure(bp: Dictionary) -> Dictionary:
 	if not bp.has("interior"):
-		bp["interior"] = {"next_id": 1, "entrances": [], "corridors": []}
+		bp["interior"] = {"next_id": 1, "entrances": [], "nodes": [], "corridors": []}
+	if not bp["interior"].has("nodes"):
+		bp["interior"]["nodes"] = []
 	return bp["interior"]
 
 
@@ -38,6 +47,11 @@ static func normalize(bp: Dictionary) -> void:
 		e["u"] = float(e.get("u", 0.0))
 		e["v"] = float(e.get("v", 0.0))
 		it["next_id"] = maxi(int(it["next_id"]), int(e["id"]) + 1)
+	for n in it["nodes"]:
+		n["id"] = int(n["id"])
+		n["pos"] = [float(n["pos"][0]), float(n["pos"][1]), float(n["pos"][2])]
+		n["size"] = [float(n["size"][0]), float(n["size"][1]), float(n["size"][2])]
+		it["next_id"] = maxi(int(it["next_id"]), int(n["id"]) + 1)
 	for c in it["corridors"]:
 		c["id"] = int(c["id"])
 		c["a"] = int(c["a"])
@@ -67,8 +81,12 @@ static func prune(bp: Dictionary) -> int:
 			remove_entrance(bp, int(e["id"]))
 			removed += 1
 	for c in it["corridors"].duplicate():
-		if entrance(bp, int(c["a"])).is_empty() or entrance(bp, int(c["b"])).is_empty():
+		if end_info(bp, int(c["a"])).is_empty() or end_info(bp, int(c["b"])).is_empty():
 			remove_corridor(bp, int(c["id"]))
+			removed += 1
+	for n in it["nodes"].duplicate():
+		if node_degree(bp, int(n["id"])) == 0:
+			it["nodes"].erase(n)
 			removed += 1
 	return removed
 
@@ -115,7 +133,7 @@ static func tube_half(bp: Dictionary, wf: float, kind: int) -> Vector2:
 	var w0 := base_width(bp)
 	if kind == 3:
 		return Vector2(0.38 * w0, 0.38 * w0)
-	return Vector2(0.5 * w0 * wf, 0.5 * w0 * (1.35 + 0.2 * (wf - 1.0)))
+	return Vector2(0.5 * w0 * wf, 0.5 * w0 * (1.35 + 0.35 * (wf - 1.0)))
 
 
 static func _tangents(axis: int) -> Array:
@@ -230,6 +248,10 @@ static func on_module_removed(bp: Dictionary, module_id: int) -> void:
 
 
 static func scale(bp: Dictionary, s: float) -> void:
+	for n in ensure(bp)["nodes"]:
+		for k in 3:
+			n["pos"][k] = float(n["pos"][k]) * s
+			n["size"][k] = float(n["size"][k]) * s
 	for c in ensure(bp)["corridors"]:
 		for p in c["pts"]:
 			p[0] = float(p[0]) * s
@@ -244,21 +266,350 @@ static func entrance_used(bp: Dictionary, entrance_id: int) -> bool:
 	return false
 
 
+# ================================================================== nodes (junctions and rooms)
+static func nodes(bp: Dictionary) -> Array:
+	return ensure(bp)["nodes"]
+
+
+static func node(bp: Dictionary, id: int) -> Dictionary:
+	for n in nodes(bp):
+		if int(n["id"]) == id:
+			return n
+	return {}
+
+
+static func node_pos(n: Dictionary) -> Vector3:
+	return ShipData.v3(n["pos"])
+
+
+static func node_size(n: Dictionary) -> Vector3:
+	return ShipData.v3(n["size"])
+
+
+static func node_box(n: Dictionary) -> AABB:
+	var sz := node_size(n)
+	return AABB(node_pos(n) - sz * 0.5, sz)
+
+
+static func node_degree(bp: Dictionary, id: int) -> int:
+	var d := 0
+	for c in corridors(bp):
+		if int(c["a"]) == id:
+			d += 1
+		if int(c["b"]) == id:
+			d += 1
+	return d
+
+
+## Size of a plain junction chamber: a bit bigger than the corridor tube.
+static func junction_size(bp: Dictionary) -> Vector3:
+	var ab := tube_half(bp, 1.0, 0)
+	return Vector3(ab.x * 2.36, ab.y * 2.24, ab.x * 2.36)
+
+
+static func is_room(bp: Dictionary, n: Dictionary) -> bool:
+	var js := junction_size(bp)
+	var sz := node_size(n)
+	return sz.x > js.x * 1.5 or sz.z > js.z * 1.5 or sz.y > js.y * 1.5
+
+
+## An end of a corridor, whichever kind: {kind, id, pos, stub, mod (module id or -1), node (node id or -1)}.
+static func end_info(bp: Dictionary, id: int) -> Dictionary:
+	var e := entrance(bp, id)
+	if not e.is_empty():
+		return {"kind": "entrance", "id": id, "pos": entrance_pos(bp, e), "stub": entrance_stub(bp, e), "mod": int(e["module"]), "node": -1}
+	var n := node(bp, id)
+	if not n.is_empty():
+		return {"kind": "node", "id": id, "pos": node_pos(n), "stub": node_pos(n), "mod": -1, "node": id}
+	return {}
+
+
+## "" if a junction / room fits in the hull, clear of the modules and of other nodes; otherwise why not.
+static func node_problem(bp: Dictionary, n: Dictionary) -> String:
+	var rings: Array = bp["rings"]
+	var m := margin(bp)
+	var c := node_pos(n)
+	var h := node_size(n) * 0.5 + Vector3(m, m, m)
+	var pts: Array = [c]
+	for sx in [-1.0, 0.0, 1.0]:
+		for sy in [-1.0, 0.0, 1.0]:
+			for sz in [-1.0, 0.0, 1.0]:
+				if sx != 0.0 or sy != 0.0 or sz != 0.0:
+					pts.append(c + Vector3(sx * h.x * (0.85 if sx != 0.0 and sy != 0.0 and sz != 0.0 else 1.0), sy * h.y * (0.85 if sx != 0.0 and sy != 0.0 and sz != 0.0 else 1.0), sz * h.z * (0.85 if sx != 0.0 and sy != 0.0 and sz != 0.0 else 1.0)))
+	for p in pts:
+		if not ShipData.hull_contains(rings, p):
+			return "leaves the hull"
+	var box := node_box(n).grow(0.03)
+	for mod in bp["modules"]:
+		if ShipData.module_box(mod).intersects(box):
+			return "cuts through %s #%d" % [ShipData.MODULES[String(mod["type"])]["label"], int(mod["id"])]
+	for o in nodes(bp):
+		if int(o["id"]) != int(n["id"]) and node_box(o).intersects(box):
+			return "overlaps %s #%d" % ["room" if is_room(bp, o) else "junction", int(o["id"])]
+	return ""
+
+
+static func node_label(bp: Dictionary, n: Dictionary) -> String:
+	var deg := node_degree(bp, int(n["id"]))
+	if is_room(bp, n):
+		return "Room"
+	match deg:
+		3:
+			return "T-piece"
+		4:
+			return "4-way"
+	return "Junction"
+
+
+static func add_node(bp: Dictionary, pos: Vector3, size: Vector3 = Vector3.ZERO) -> Dictionary:
+	var it := ensure(bp)
+	var n := {"id": int(it["next_id"]), "pos": ShipData.a3(pos), "size": ShipData.a3(junction_size(bp) if size == Vector3.ZERO else size)}
+	var why := node_problem(bp, n)
+	if why != "":
+		return {"ok": false, "msg": "No room for a junction there: it %s." % why}
+	it["next_id"] = int(it["next_id"]) + 1
+	it["nodes"].append(n)
+	return {"ok": true, "id": int(n["id"])}
+
+
+static func _corridors_of(bp: Dictionary, id: int) -> Array:
+	var out: Array = []
+	for c in corridors(bp):
+		if int(c["a"]) == id or int(c["b"]) == id:
+			out.append(c)
+	return out
+
+
+## Everything that touches a node still fits (the node itself and every corridor that ends there).
+static func node_network_problem(bp: Dictionary, n: Dictionary) -> String:
+	var why := node_problem(bp, n)
+	if why != "":
+		return "the %s %s" % ["room" if is_room(bp, n) else "junction", why]
+	for c in _corridors_of(bp, int(n["id"])):
+		var w2 := polyline_problem(bp, c)
+		if w2 != "":
+			return "corridor #%d %s" % [int(c["id"]), w2]
+	return ""
+
+
+## Resize a room (refused, and nothing changes, if it would not fit).
+static func set_node_size(bp: Dictionary, id: int, size: Vector3) -> Dictionary:
+	var n := node(bp, id)
+	if n.is_empty():
+		return {"ok": false, "msg": "No such node."}
+	var old: Array = n["size"]
+	var mn := junction_size(bp) * 0.6
+	n["size"] = ShipData.a3(Vector3(maxf(size.x, mn.x), maxf(size.y, mn.y), maxf(size.z, mn.z)))
+	var why := node_network_problem(bp, n)
+	if why != "":
+		n["size"] = old
+		return {"ok": false, "msg": "Too big: %s." % why}
+	return {"ok": true}
+
+
+## Give a node a size; if it does not fit where it is, slide it to the nearest spot where it (and every corridor
+## ending on it) fits. False, and nothing changes, if there is none.
+static func _fit_node(bp: Dictionary, n: Dictionary, size: Vector3) -> bool:
+	var old_pos: Array = (n["pos"] as Array).duplicate()
+	var old_size: Array = (n["size"] as Array).duplicate()
+	n["size"] = ShipData.a3(size)
+	if node_network_problem(bp, n) == "":
+		return true
+	var base := node_pos(n)
+	var step := base_width(bp) * 0.5
+	var offs: Array = []
+	for ix in range(-4, 5):
+		for iy in range(-2, 3):
+			for iz in range(-4, 5):
+				if ix != 0 or iy != 0 or iz != 0:
+					offs.append(Vector3(ix * step, iy * step, iz * step))
+	offs.sort_custom(func(a, b): return (a as Vector3).length_squared() < (b as Vector3).length_squared())
+	for o in offs:
+		n["pos"] = ShipData.a3(base + (o as Vector3))
+		if node_problem(bp, n) == "" and node_network_problem(bp, n) == "":
+			return true
+	n["pos"] = old_pos
+	n["size"] = old_size
+	return false
+
+
+## Next room preset (junction -> small -> medium -> large -> long hall -> junction). A room that does not fit where
+## the junction is slides to the nearest place where it does.
+static func cycle_room(bp: Dictionary, id: int) -> Dictionary:
+	var n := node(bp, id)
+	if n.is_empty():
+		return {"ok": false, "msg": "No such node."}
+	var w0 := base_width(bp)
+	var sz := node_size(n)
+	var cur := -1                                  # -1 = plain junction
+	for i in range(ROOM_PRESETS.size()):
+		var ps: Vector3 = (ROOM_PRESETS[i] as Vector3) * w0
+		if absf(sz.x - ps.x) < 0.05 * w0 and absf(sz.z - ps.z) < 0.05 * w0:
+			cur = i
+	var nxt := cur + 1
+	while nxt < ROOM_PRESETS.size():
+		if _fit_node(bp, n, (ROOM_PRESETS[nxt] as Vector3) * w0):
+			return {"ok": true, "room": true}
+		nxt += 1
+	if _fit_node(bp, n, junction_size(bp)):
+		return {"ok": true, "room": false}
+	return {"ok": false, "msg": "No bigger size fits around here."}
+
+
+static func move_node(bp: Dictionary, id: int, pos: Vector3) -> bool:
+	var n := node(bp, id)
+	if n.is_empty():
+		return false
+	var old: Array = n["pos"]
+	n["pos"] = ShipData.a3(pos)
+	if node_network_problem(bp, n) != "":
+		n["pos"] = old
+		return false
+	return true
+
+
+## Turn a corridor around (A <-> B). Geometry stays the same.
+static func reverse_corridor(c: Dictionary) -> void:
+	var a: int = c["a"]
+	c["a"] = c["b"]
+	c["b"] = a
+	(c["pts"] as Array).reverse()
+	(c["w"] as Array).reverse()
+	var nseg := (c["w"] as Array).size()
+	var doors: Array = []
+	for d in c["doors"]:
+		doors.append([nseg - 1 - int(d[0]), 1.0 - float(d[1])])
+	c["doors"] = doors
+
+
+## Cut a corridor in two at a point of one of its segments and put a junction node there. This is how a corridor is
+## joined to another corridor (T-piece, 4-way). {ok, node, msg}
+static func split_corridor(bp: Dictionary, cid: int, seg: int, q: Vector3) -> Dictionary:
+	var c := corridor(bp, cid)
+	if c.is_empty():
+		return {"ok": false, "msg": "No such corridor."}
+	var poly := polyline(bp, c)
+	var nseg := poly.size() - 1
+	var a_entr := not entrance(bp, int(c["a"])).is_empty()
+	var b_entr := not entrance(bp, int(c["b"])).is_empty()
+	if (a_entr and seg < 1) or (b_entr and seg > nseg - 2):
+		return {"ok": false, "msg": "Too close to the entrance."}
+	seg = clampi(seg, 0, nseg - 1)
+	var ab := poly[seg + 1] - poly[seg]
+	var ts0 := clampf((q - poly[seg]).dot(ab) / maxf(ab.length_squared(), 1e-9), 0.1, 0.9)
+	# the junction goes where it was asked, or slides along the segment to the nearest place where it fits
+	var ts := ts0
+	var added := {"ok": false, "msg": "No room for a junction there."}
+	var step_m := maxf(base_width(bp) * 0.5, 0.2)
+	var steps := clampi(int(ab.length() / step_m), 1, 40)
+	for k in range(steps * 2 + 1):
+		var off := float((k + 1) / 2) * (1.0 if k % 2 == 1 else -1.0) * (step_m / maxf(ab.length(), 1e-6))
+		ts = ts0 + off
+		if ts < 0.08 or ts > 0.92:
+			continue
+		q = poly[seg].lerp(poly[seg + 1], ts)
+		added = add_node(bp, q)
+		if bool(added["ok"]):
+			break
+	if not bool(added["ok"]):
+		return added
+	var nid := int(added["id"])
+	var it := ensure(bp)
+	var off_a := bend_offset(bp, c)
+	var tail_b := tail_len(bp, c)
+	var P1: Array = []
+	for i in range(seg + 1):
+		P1.append(poly[i])
+	P1.append(q)
+	var P2: Array = [q]
+	for i in range(seg + 1, poly.size()):
+		P2.append(poly[i])
+	var w: Array = c["w"]
+	var c1 := {"id": int(c["id"]), "a": int(c["a"]), "b": nid, "pts": [], "w": [], "doors": []}
+	var c2 := {"id": int(it["next_id"]), "a": nid, "b": int(c["b"]), "pts": [], "w": [], "doors": []}
+	it["next_id"] = int(it["next_id"]) + 1
+	for i in range(off_a, P1.size() - 1):
+		c1["pts"].append(ShipData.a3(P1[i]))
+	for i in range(1, P2.size() - tail_b):
+		c2["pts"].append(ShipData.a3(P2[i]))
+	for i in range(seg + 1):
+		c1["w"].append(float(w[i]) if i < w.size() else 1.0)
+	for i in range(seg, nseg):
+		c2["w"].append(float(w[i]) if i < w.size() else 1.0)
+	for d in c["doors"]:
+		var ds := int(d[0])
+		var dt := float(d[1])
+		if ds < seg:
+			c1["doors"].append([ds, dt])
+		elif ds > seg:
+			c2["doors"].append([ds - seg, dt])
+		elif dt < ts:
+			c1["doors"].append([seg, dt / ts])
+		else:
+			c2["doors"].append([0, (dt - ts) / (1.0 - ts)])
+	var idx := (it["corridors"] as Array).find(c)
+	it["corridors"][idx] = c1
+	it["corridors"].insert(idx + 1, c2)
+	return {"ok": true, "node": nid, "c1": int(c1["id"]), "c2": int(c2["id"])}
+
+
+## Remove a node. With exactly two corridors on it they are joined back into one; otherwise they go with it.
+static func remove_node(bp: Dictionary, id: int) -> void:
+	var it := ensure(bp)
+	var n := node(bp, id)
+	if n.is_empty():
+		return
+	var cs := _corridors_of(bp, id)
+	if cs.size() == 2 and int(cs[0]["a"]) != int(cs[0]["b"]):
+		var c1: Dictionary = cs[0]
+		var c2: Dictionary = cs[1]
+		if int(c1["b"]) != id:
+			reverse_corridor(c1)
+		if int(c2["a"]) != id:
+			reverse_corridor(c2)
+		if int(c1["a"]) != int(c2["b"]):
+			var n1 := (c1["w"] as Array).size()
+			(c1["pts"] as Array).append(n["pos"].duplicate())
+			(c1["pts"] as Array).append_array(c2["pts"])
+			(c1["w"] as Array).append_array(c2["w"])
+			for d in c2["doors"]:
+				(c1["doors"] as Array).append([int(d[0]) + n1, float(d[1])])
+			c1["b"] = int(c2["b"])
+			remove_corridor(bp, int(c2["id"]))
+			it["nodes"].erase(n)
+			return
+	for c in cs:
+		remove_corridor(bp, int(c["id"]))
+	it["nodes"].erase(n)
+
+
 # ================================================================== paths
-## Full path: entrance A, stub A, bend points, stub B, entrance B.
+## Full path: entrance A (and its stub) or node A, bend points, stub B and entrance B, or node B.
 static func polyline(bp: Dictionary, c: Dictionary) -> PackedVector3Array:
-	var ea := entrance(bp, int(c["a"]))
-	var eb := entrance(bp, int(c["b"]))
+	var ea := end_info(bp, int(c["a"]))
+	var eb := end_info(bp, int(c["b"]))
 	var out := PackedVector3Array()
 	if ea.is_empty() or eb.is_empty():
 		return out
-	out.append(entrance_pos(bp, ea))
-	out.append(entrance_stub(bp, ea))
+	out.append(ea["pos"])
+	if String(ea["kind"]) == "entrance":
+		out.append(ea["stub"])
 	for p in c["pts"]:
 		out.append(ShipData.v3(p))
-	out.append(entrance_stub(bp, eb))
-	out.append(entrance_pos(bp, eb))
+	if String(eb["kind"]) == "entrance":
+		out.append(eb["stub"])
+	out.append(eb["pos"])
 	return out
+
+
+## Index in polyline() of the first bend point (2 after an entrance and its stub, 1 after a node).
+static func bend_offset(bp: Dictionary, c: Dictionary) -> int:
+	return 2 if not entrance(bp, int(c["a"])).is_empty() else 1
+
+
+## Number of polyline points after the last bend point (stub + entrance = 2, a node = 1).
+static func tail_len(bp: Dictionary, c: Dictionary) -> int:
+	return 2 if not entrance(bp, int(c["b"])).is_empty() else 1
 
 
 ## 0 corridor, 1 slope, 2 stairs, 3 ladder, from the steepness of one segment.
@@ -321,20 +672,35 @@ static func stats(bp: Dictionary) -> Dictionary:
 		st += int(i["kinds"][2])
 		ld += int(i["kinds"][3])
 		dr += int(i["doors"])
-	return {"count": n, "length": l, "stairs": st, "ladders": ld, "doors": dr, "entrances": entrances(bp).size()}
+	var rooms := 0
+	var junctions := 0
+	for nd in nodes(bp):
+		if is_room(bp, nd):
+			rooms += 1
+		elif node_degree(bp, int(nd["id"])) >= 3:
+			junctions += 1
+	for c in corridors(bp):
+		var run := false
+		for f in c["w"]:
+			if float(f) >= ROOM_WF and not run:
+				rooms += 1
+			run = float(f) >= ROOM_WF
+	return {"count": n, "length": l, "stairs": st, "ladders": ld, "doors": dr, "entrances": entrances(bp).size(), "rooms": rooms, "junctions": junctions}
 
 
 ## Insert a bend point into a segment (so the corridor can be bent by hand).
 static func insert_bend(bp: Dictionary, c: Dictionary, seg: int, p: Vector3) -> int:
 	var poly := polyline(bp, c)
-	if seg < 1 or seg > poly.size() - 3:
-		seg = clampi(seg, 1, maxi(poly.size() - 3, 1))
+	var off := bend_offset(bp, c)
+	var lo := 1 if off == 2 else 0
+	var hi := poly.size() - 2 - (1 if tail_len(bp, c) == 2 else 0)
+	seg = clampi(seg, lo, maxi(hi, lo))
 	var a := poly[seg]
 	var b := poly[seg + 1]
 	var ab := b - a
 	var tsplit := clampf((p - a).dot(ab) / maxf(ab.length_squared(), 1e-9), 0.05, 0.95)
 	var pts: Array = c["pts"]
-	pts.insert(seg - 1, ShipData.a3(p))
+	pts.insert(seg + 1 - off, ShipData.a3(p))
 	var w: Array = c["w"]
 	var fw := float(w[seg]) if seg < w.size() else 1.0
 	w.insert(seg, fw)
@@ -351,15 +717,15 @@ static func insert_bend(bp: Dictionary, c: Dictionary, seg: int, p: Vector3) -> 
 		else:
 			doors.append([seg + 1, (dt - tsplit) / (1.0 - tsplit)])
 	c["doors"] = doors
-	return seg - 1
+	return seg + 1 - off
 
 
 static func remove_bend(bp: Dictionary, c: Dictionary, k: int) -> void:
 	var pts: Array = c["pts"]
 	if k < 0 or k >= pts.size():
 		return
+	var seg := bend_offset(bp, c) + k - 1     # segments seg and seg + 1 merge
 	pts.remove_at(k)
-	var seg := k + 1                       # segments seg and seg + 1 merge
 	var w: Array = c["w"]
 	if seg + 1 < w.size():
 		w[seg] = maxf(float(w[seg]), float(w[seg + 1]))
@@ -431,6 +797,11 @@ static func _tube_problem(bp: Dictionary, pos: Vector3, side: Vector3, up: Vecto
 			continue
 		if ShipData.module_box(mod).intersects(box):
 			return "cuts through %s #%d" % [ShipData.MODULES[String(mod["type"])]["label"], int(mod["id"])]
+	for nd in nodes(bp):
+		if exempt.has(-int(nd["id"])):
+			continue
+		if node_box(nd).intersects(box):
+			return "runs into %s #%d" % [String(node_label(bp, nd)).to_lower(), int(nd["id"])]
 	return ""
 
 
@@ -438,9 +809,14 @@ static func _tube_problem(bp: Dictionary, pos: Vector3, side: Vector3, up: Vecto
 static func _exempt_near(bp: Dictionary, c: Dictionary, pos: Vector3, ex: float) -> Array:
 	var out: Array = []
 	for key in ["a", "b"]:
-		var e := entrance(bp, int(c[key]))
-		if not e.is_empty() and entrance_pos(bp, e).distance_to(pos) < ex:
-			out.append(int(e["module"]))
+		var e := end_info(bp, int(c[key]))
+		if e.is_empty():
+			continue
+		if String(e["kind"]) == "entrance":
+			if (e["pos"] as Vector3).distance_to(pos) < ex:
+				out.append(int(e["mod"]))
+		elif node_box(node(bp, int(e["id"]))).grow(ex).has_point(pos):
+			out.append(-int(e["id"]))
 	return out
 
 
@@ -578,6 +954,10 @@ static func polyline_problem(bp: Dictionary, c: Dictionary) -> String:
 
 static func issues(bp: Dictionary) -> Array:
 	var out: Array = []
+	for nd in nodes(bp):
+		var nw := node_problem(bp, nd)
+		if nw != "":
+			out.append({"msg": "%s #%d %s" % [node_label(bp, nd), int(nd["id"]), nw], "mod": -1})
 	for c in corridors(bp):
 		var why := polyline_problem(bp, c)
 		if why != "":
@@ -597,6 +977,12 @@ class RouteStar extends AStar3D:
 		return get_point_position(from_id).distance_to(get_point_position(to_id))
 
 
+static func _end_exempt(bp: Dictionary, e: Dictionary, p: Vector3, ex: float) -> int:
+	if String(e["kind"]) == "entrance":
+		return int(e["mod"]) if (e["pos"] as Vector3).distance_to(p) < ex else -99999
+	return -int(e["id"]) if node_box(node(bp, int(e["id"]))).grow(ex).has_point(p) else -99999
+
+
 static func _line_ok(bp: Dictionary, pa: Vector3, pb: Vector3, ea: Dictionary, eb: Dictionary) -> bool:
 	var w0 := base_width(bp)
 	var ab := tube_half(bp, 1.0, 0)
@@ -604,34 +990,32 @@ static func _line_ok(bp: Dictionary, pa: Vector3, pb: Vector3, ea: Dictionary, e
 	var n := maxi(int(ceil(d.length() / maxf(w0 * 0.4, 0.15))), 1)
 	var t := d.normalized() if d.length() > 1e-6 else Vector3.RIGHT
 	var fr := _frame(t, Vector3.UP)
-	var ca := entrance_pos(bp, ea)
-	var cb := entrance_pos(bp, eb)
 	for k in range(n + 1):
 		var p := pa.lerp(pb, float(k) / float(n))
-		var ex: Array = []
-		if p.distance_to(ca) < w0 * 1.6:
-			ex.append(int(ea["module"]))
-		if p.distance_to(cb) < w0 * 1.6:
-			ex.append(int(eb["module"]))
+		var ex: Array = [_end_exempt(bp, ea, p, w0 * 1.6), _end_exempt(bp, eb, p, w0 * 1.6)]
 		if _tube_problem(bp, p, fr[0], fr[1], ab.x, ab.y, ex) != "":
 			return false
 	return true
 
 
-## Find a path between two entrances. {ok, pts (bend points), msg}
+## Find a path between two ends (entrance or node, as given by end_info). {ok, pts (bend points), msg}
 static func route(bp: Dictionary, ea: Dictionary, eb: Dictionary) -> Dictionary:
 	var rings: Array = bp["rings"]
 	var w0 := base_width(bp)
 	var ab := tube_half(bp, 1.0, 0)
 	var r := ab.x + margin(bp)               # clearance sideways
 	var rv := ab.y + margin(bp)              # clearance up and down (a corridor is taller than wide)
-	var pa := entrance_stub(bp, ea)
-	var pb := entrance_stub(bp, eb)
+	var pa: Vector3 = ea["stub"]
+	var pb: Vector3 = eb["stub"]
 	var boxes: Array = []
 	var grow := Vector3(r, rv, r)
 	for mod in bp["modules"]:
 		var bx := ShipData.module_box(mod)
 		boxes.append(AABB(bx.position - grow, bx.size + grow * 2.0))
+	for nd in nodes(bp):                     # rooms and junctions are obstacles for the other corridors
+		if int(nd["id"]) != int(ea["id"]) and int(nd["id"]) != int(eb["id"]):
+			var nb := node_box(nd)
+			boxes.append(AABB(nb.position - grow, nb.size + grow * 2.0))
 	var ex := w0 * 1.6
 	if _line_ok(bp, pa, pb, ea, eb):
 		return {"ok": true, "pts": []}
@@ -781,17 +1165,51 @@ static func _nearest_free(astar: AStar3D, idx: int, free: PackedByteArray, dims:
 	return best
 
 
-## Join two entrances with a corridor (auto-routed inside the hull, with a door at each end).
+## Doors a new corridor starts with: one in the doorway of each entrance, one at the wall of each room.
+static func _default_doors(bp: Dictionary, c: Dictionary) -> Array:
+	var poly := polyline(bp, c)
+	var nseg := poly.size() - 1
+	var doors: Array = []
+	for end_a in [true, false]:
+		var e := end_info(bp, int(c["a"] if end_a else c["b"]))
+		var seg := 0 if end_a else nseg - 1
+		if String(e["kind"]) == "entrance":
+			doors.append([seg, 0.5])
+			continue
+		var n := node(bp, int(e["id"]))
+		if not is_room(bp, n):
+			continue
+		var p0 := poly[0] if end_a else poly[nseg]
+		var p1 := poly[1] if end_a else poly[nseg - 1]
+		var dir := (p1 - p0)
+		var len := dir.length()
+		if len < 1e-4:
+			continue
+		dir /= len
+		var half := node_size(n) * 0.5
+		var tmax := INF
+		for ax in 3:
+			if absf(dir[ax]) > 1e-4:
+				tmax = minf(tmax, half[ax] / absf(dir[ax]))
+		var t := tmax / len
+		if t < 0.9:
+			doors.append([seg, t if end_a else 1.0 - t])
+	return doors
+
+
+## Join two ends (entrances and / or nodes) with a corridor, auto-routed inside the hull.
 static func add_corridor(bp: Dictionary, ea_id: int, eb_id: int) -> Dictionary:
-	var ea := entrance(bp, ea_id)
-	var eb := entrance(bp, eb_id)
+	var ea := end_info(bp, ea_id)
+	var eb := end_info(bp, eb_id)
 	if ea.is_empty() or eb.is_empty():
-		return {"ok": false, "msg": "Pick two entrances."}
-	if int(ea["module"]) == int(eb["module"]):
+		return {"ok": false, "msg": "Pick two ends."}
+	if ea_id == eb_id:
+		return {"ok": false, "msg": "That is the same end."}
+	if int(ea["mod"]) >= 0 and int(ea["mod"]) == int(eb["mod"]):
 		return {"ok": false, "msg": "Both entrances are on the same module."}
 	for c in corridors(bp):
 		if (int(c["a"]) == ea_id and int(c["b"]) == eb_id) or (int(c["a"]) == eb_id and int(c["b"]) == ea_id):
-			return {"ok": false, "msg": "Those entrances are already joined."}
+			return {"ok": false, "msg": "Those two ends are already joined."}
 	var r := route(bp, ea, eb)
 	if not bool(r["ok"]):
 		return r
@@ -799,13 +1217,12 @@ static func add_corridor(bp: Dictionary, ea_id: int, eb_id: int) -> Dictionary:
 	var pts: Array = []
 	for p in r["pts"]:
 		pts.append(ShipData.a3(p))
-	var segs := pts.size() + 3
-	var w: Array = []
-	for i in segs:
-		w.append(1.0)
-	var c := {"id": int(it["next_id"]), "a": ea_id, "b": eb_id, "pts": pts, "w": w, "doors": [[0, 0.5], [segs - 1, 0.5]]}
+	var c := {"id": int(it["next_id"]), "a": ea_id, "b": eb_id, "pts": pts, "w": [], "doors": []}
 	it["next_id"] = int(it["next_id"]) + 1
 	it["corridors"].append(c)
+	for i in range(polyline(bp, c).size() - 1):
+		c["w"].append(1.0)
+	c["doors"] = _default_doors(bp, c)
 	var why := polyline_problem(bp, c)
 	if why != "":
 		remove_corridor(bp, int(c["id"]))
@@ -815,7 +1232,7 @@ static func add_corridor(bp: Dictionary, ea_id: int, eb_id: int) -> Dictionary:
 
 ## Throw away the hand-made bends of a corridor and route it again.
 static func reroute(bp: Dictionary, c: Dictionary) -> Dictionary:
-	var r := route(bp, entrance(bp, int(c["a"])), entrance(bp, int(c["b"])))
+	var r := route(bp, end_info(bp, int(c["a"])), end_info(bp, int(c["b"])))
 	if not bool(r["ok"]):
 		return r
 	var pts: Array = []
@@ -823,10 +1240,10 @@ static func reroute(bp: Dictionary, c: Dictionary) -> Dictionary:
 		pts.append(ShipData.a3(p))
 	c["pts"] = pts
 	var w: Array = []
-	for i in range(pts.size() + 3):
+	for i in range(polyline(bp, c).size() - 1):
 		w.append(1.0)
 	c["w"] = w
-	c["doors"] = [[0, 0.5], [pts.size() + 2, 0.5]]
+	c["doors"] = _default_doors(bp, c)
 	return {"ok": true}
 
 
@@ -900,7 +1317,7 @@ static func tri_count(bp: Dictionary) -> int:
 	var n := 0
 	for c in corridors(bp):
 		n += seg_count(bp, c) * 12 + (c["doors"] as Array).size() * 12
-	return n
+	return n + nodes(bp).size() * 24
 
 
 const PROFILE_STEPS := 3
@@ -1017,9 +1434,53 @@ static func _draw_rings(S: Array, w0: float) -> Array:
 	return out
 
 
+## A box with rounded edges (junction chambers and rooms), smooth normals.
+static func _rounded_box(arr: Dictionary, center: Vector3, half: Vector3, base: Color) -> void:
+	var r := 0.40 * minf(half.x, minf(half.y, half.z))
+	var inner := half - Vector3(r, r, r)
+	var ds := [0.0, 0.5, 0.866, 1.0]
+	for ax in 3:
+		var u := (ax + 1) % 3
+		var v := (ax + 2) % 3
+		var cu: Array = []
+		var cv: Array = []
+		for k in range(ds.size() - 1, -1, -1):
+			cu.append(-(inner[u] + r * float(ds[k]) * 1.0))
+			cv.append(-(inner[v] + r * float(ds[k]) * 1.0))
+		for k in range(ds.size()):
+			cu.append(inner[u] + r * float(ds[k]))
+			cv.append(inner[v] + r * float(ds[k]))
+		for sgn in [-1.0, 1.0]:
+			var grid: Array = []
+			for i in range(cu.size()):
+				var row: Array = []
+				for j in range(cv.size()):
+					var p := Vector3.ZERO
+					p[ax] = sgn * half[ax]
+					p[u] = cu[i]
+					p[v] = cv[j]
+					var q := Vector3(clampf(p.x, -inner.x, inner.x), clampf(p.y, -inner.y, inner.y), clampf(p.z, -inner.z, inner.z))
+					var d := p - q
+					var nrm := d.normalized() if d.length() > 1e-6 else Vector3(0, 1, 0)
+					row.append({"v": center + q + nrm * r, "n": nrm})
+				grid.append(row)
+			for i in range(grid.size() - 1):
+				for j in range(grid[i].size() - 1):
+					var a0: Dictionary = grid[i][j]
+					var a1: Dictionary = grid[i + 1][j]
+					var a2: Dictionary = grid[i + 1][j + 1]
+					var a3: Dictionary = grid[i][j + 1]
+					var c0 := _shade(base, (a0["n"] as Vector3).y)
+					var c1 := _shade(base, (a1["n"] as Vector3).y)
+					var c2 := _shade(base, (a2["n"] as Vector3).y)
+					var c3 := _shade(base, (a3["n"] as Vector3).y)
+					_emit(arr, a0["v"], a1["v"], a2["v"], a0["n"], a1["n"], a2["n"], c0, c1, c2)
+					_emit(arr, a0["v"], a2["v"], a3["v"], a0["n"], a2["n"], a3["n"], c0, c2, c3)
+
+
 ## Triangle mesh of every corridor: a smooth tube with rounded corners, door frames, ribs on stairs, rungs on ladders.
 ## The selected corridor (and segment) is brightened.
-static func build_mesh(bp: Dictionary, sel_cor := -1, sel_seg := -1) -> ArrayMesh:
+static func build_mesh(bp: Dictionary, sel_cor := -1, sel_seg := -1, sel_node := -1) -> ArrayMesh:
 	var arr := {"v": [], "n": [], "c": []}
 	var w0 := base_width(bp)
 	for c in corridors(bp):
@@ -1061,6 +1522,15 @@ static func build_mesh(bp: Dictionary, sel_cor := -1, sel_seg := -1) -> ArrayMes
 					bd = dd
 					best = j
 			_collar(arr, S[best], w0 * 0.07, w0 * 0.07, DOOR_COLOR)
+	# junction chambers (T-pieces, 4-ways, dead ends) and rooms; a plain pass-through node stays invisible
+	for nd in nodes(bp):
+		var room := is_room(bp, nd)
+		if not room and node_degree(bp, int(nd["id"])) == 2 and int(nd["id"]) != sel_node:
+			continue
+		var col: Color = ROOM_COLOR if room else JUNCTION_COLOR
+		if int(nd["id"]) == sel_node:
+			col = col.lerp(Color.WHITE, 0.5)
+		_rounded_box(arr, node_pos(nd), node_size(nd) * 0.5, col)
 	var mesh := ArrayMesh.new()
 	if (arr["v"] as Array).is_empty():
 		return mesh
@@ -1071,6 +1541,20 @@ static func build_mesh(bp: Dictionary, sel_cor := -1, sel_seg := -1) -> ArrayMes
 	a[Mesh.ARRAY_COLOR] = PackedColorArray(arr["c"])
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, a)
 	return mesh
+
+
+## The junction or room a ray hits first: {node, dist, pos} or {}.
+static func pick_node_ray(bp: Dictionary, origin: Vector3, dir: Vector3) -> Dictionary:
+	var best := {}
+	var bd := INF
+	for nd in nodes(bp):
+		var h = node_box(nd).intersects_ray(origin, dir)
+		if h != null:
+			var d := origin.distance_to(h as Vector3)
+			if d < bd:
+				bd = d
+				best = {"node": int(nd["id"]), "dist": d, "pos": h}
+	return best
 
 
 ## Closest point of the path to a ray: {cor, seg, t, pos, dist}. Used to pick corridors in the editor and in Panel 1.

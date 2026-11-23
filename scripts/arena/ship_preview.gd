@@ -127,7 +127,7 @@ var heat_mi: MeshInstance3D
 var cor_mi: MeshInstance3D
 var cor_mat: ShaderMaterial
 var corr := [false, false, true, false]   # show the corridors in this view
-var _cor_hl := Vector2i(-2, -2)
+var _cor_hl := Vector3i(-2, -2, -2)
 var extra_btns: Array = []                # buttons only shown in the expanded panel
 var btn_corr_basic: Button
 var btn_corr_onion: Button
@@ -406,7 +406,7 @@ func bind(s: Ship) -> void:
 	cor_mat.render_priority = 0
 	cor_mi.material_override = cor_mat
 	cor_mi.mesh = Interior.build_mesh(s.bp)
-	_cor_hl = Vector2i(-1, -1)
+	_cor_hl = Vector3i(-1, -1, -1)
 	world.add_child(cor_mi)
 	_layout_explode()
 	# dynamic overlays
@@ -888,14 +888,17 @@ func refresh() -> void:
 	if cor_mat != null:
 		cor_mat.set_shader_parameter("clip_y", cy)
 		cor_mat.set_shader_parameter("dim_y", dy)
-		var hl := Vector2i(-1, -1)
-		if _is(hover, "corridor", "id", int(hover.get("id", -1))):
-			hl = Vector2i(int(hover["id"]), int(hover["seg"]))
-		elif _is(selected, "corridor", "id", int(selected.get("id", -1))):
-			hl = Vector2i(int(selected["id"]), int(selected["seg"]))
+		var hl := Vector3i(-1, -1, -1)
+		for h in [hover, selected]:
+			if hl.x >= 0 or hl.z >= 0 or h.is_empty():
+				continue
+			if String(h["kind"]) == "corridor":
+				hl = Vector3i(int(h["id"]), int(h["seg"]), -1)
+			elif String(h["kind"]) == "node":
+				hl = Vector3i(-1, -1, int(h["id"]))
 		if hl != _cor_hl:
 			_cor_hl = hl
-			cor_mi.mesh = Interior.build_mesh(ship.bp, hl.x, hl.y)
+			cor_mi.mesh = Interior.build_mesh(ship.bp, hl.x, hl.y, hl.z)
 	if _cut_dirty:
 		_rebuild_cut()
 	_rebuild_overlay()
@@ -990,7 +993,7 @@ func _view_bounds() -> AABB:
 
 
 func _target_dist() -> float:
-	return radius * 0.74 / sin(deg_to_rad(cam.fov * 0.5)) / zoom
+	return radius * 0.82 / sin(deg_to_rad(cam.fov * 0.5)) / zoom
 
 
 func _process(delta: float) -> void:
@@ -1018,7 +1021,7 @@ func _process(delta: float) -> void:
 		yaw += delta * 0.3
 	var off := Vector3(0, 0, dist).rotated(Vector3.RIGHT, pitch).rotated(Vector3.UP, yaw)
 	cam.look_at_from_position(center + off, center, Vector3.UP)
-	cam.h_offset = lerpf(cam.h_offset, dist * (0.09 if view == ONION else 0.0), 1.0 - exp(-delta * 6.0))   # make room for the deck slider
+	cam.h_offset = lerpf(cam.h_offset, dist * (0.07 if view == ONION else 0.0), 1.0 - exp(-delta * 6.0))   # make room for the deck slider
 	cam.near = maxf(dist * 0.02, 0.05)
 	cam.far = dist * 12.0 + radius * 4.0
 	_hover_t += delta
@@ -1077,6 +1080,14 @@ func pick_at(p: Vector2) -> Dictionary:
 			if float(ch["dist"]) < best_mt:
 				best_mt = float(ch["dist"])
 				best_id = -2
+	var best_node := {}
+	if cor_mi != null and cor_mi.visible:
+		var nh := Interior.pick_node_ray(ship.bp, o, d)
+		if not nh.is_empty() and (nh["pos"] as Vector3).y <= cy:
+			best_node = {"kind": "node", "id": int(nh["node"]), "y": (nh["pos"] as Vector3).y}
+			if float(nh["dist"]) < best_mt:
+				best_mt = float(nh["dist"])
+				best_id = -3
 	var best_hull := {}
 	var best_ht := INF
 	if hull_mode <= 2:
@@ -1097,6 +1108,8 @@ func pick_at(p: Vector2) -> Dictionary:
 					best_ht = t2
 					var nrm: Vector3 = -((tr[1] as Vector3) - (tr[0] as Vector3)).cross((tr[2] as Vector3) - (tr[0] as Vector3))
 					best_hull = {"kind": "hull", "sec": int(sc["i"]), "tri": ti, "face": _face_name(nrm), "y": gh.y}
+	if best_id == -3 and not (hull_mode == 1 and best_ht < best_mt):
+		return best_node
 	if best_id == -2 and not (hull_mode == 1 and best_ht < best_mt):
 		return best_cor
 	if best_id >= 0 and not (hull_mode == 1 and best_ht < best_mt):
@@ -1131,6 +1144,20 @@ func info_lines(h: Dictionary, max_lines := 99) -> Array:
 	var out: Array = []
 	if ship == null or h.is_empty():
 		return out
+	if String(h["kind"]) == "node":
+		var nd := Interior.node(ship.bp, int(h["id"]))
+		if nd.is_empty():
+			return out
+		var room := Interior.is_room(ship.bp, nd)
+		var sz := Interior.node_size(nd)
+		var deg := Interior.node_degree(ship.bp, int(nd["id"]))
+		out.append(_ln("%s #%d" % [String(Interior.node_label(ship.bp, nd)).to_upper(), int(nd["id"])], Interior.ROOM_COLOR if room else Interior.JUNCTION_COLOR))
+		out.append(_ln("%.1f x %.1f x %.1f m" % [sz.x, sz.y, sz.z], AMBER))
+		out.append(_ln("%d corridor(s) meet here" % deg, GREY))
+		if room:
+			out.append(_ln("Floor area %.1f m2, volume %.1f m3" % [sz.x * sz.z, sz.x * sz.y * sz.z], GREY))
+		out.append(_ln("Deck %d of %d" % [deck_of_y(float(h["y"])) + 1, layers], GREY))
+		return out.slice(0, max_lines)
 	if String(h["kind"]) == "corridor":
 		var c := Interior.corridor(ship.bp, int(h["id"]))
 		if c.is_empty():
@@ -1148,10 +1175,17 @@ func info_lines(h: Dictionary, max_lines := 99) -> Array:
 			if int(dd[0]) == sg:
 				nd += 1
 		out.append(_ln("Doors on this segment: %d" % nd, GREY))
-		var ea := Interior.entrance(ship.bp, int(c["a"]))
-		var eb := Interior.entrance(ship.bp, int(c["b"]))
-		if not ea.is_empty() and not eb.is_empty() and ship.by_id.has(int(ea["module"])) and ship.by_id.has(int(eb["module"])):
-			out.append(_ln("%s #%d  ->  %s #%d" % [ABBR.get(String((ship.by_id[int(ea["module"])] as Dictionary)["type"]), "?"), int(ea["module"]), ABBR.get(String((ship.by_id[int(eb["module"])] as Dictionary)["type"]), "?"), int(eb["module"])], GREY))
+		var ends: Array = []
+		for key in ["a", "b"]:
+			var en := Interior.end_info(ship.bp, int(c[key]))
+			if en.is_empty():
+				continue
+			if String(en["kind"]) == "entrance" and ship.by_id.has(int(en["mod"])):
+				ends.append("%s #%d" % [ABBR.get(String((ship.by_id[int(en["mod"])] as Dictionary)["type"]), "?"), int(en["mod"])])
+			elif String(en["kind"]) == "node":
+				ends.append("%s #%d" % [Interior.node_label(ship.bp, Interior.node(ship.bp, int(en["id"]))), int(en["id"])])
+		if ends.size() == 2:
+			out.append(_ln("%s  ->  %s" % [ends[0], ends[1]], GREY))
 		var kk: Array = inf["kinds"]
 		out.append(_ln("Whole corridor %.1f m: %d flat, %d slope, %d stairs, %d ladder" % [float(inf["length"]), kk[0], kk[1], kk[2], kk[3]], GREY))
 		out.append(_ln("Deck %d of %d" % [deck_of_y(float(h["y"])) + 1, layers], GREY))
