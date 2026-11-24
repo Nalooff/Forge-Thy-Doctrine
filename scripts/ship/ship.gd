@@ -35,6 +35,10 @@ var power_demand := 0.0
 var power_frac := 1.0
 var caps := [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 var rcs_cap := 0.0
+var dormant := false              # far from the player: not simulated (see FarSim)
+var far_abs: Vec3D                # 64-bit position while dormant
+var far_vel := Vector3.ZERO
+var far_goal: Vec3D               # where a dormant ship is heading (null = drift)
 var hull_temp := 0.0             # % of critical (see ShipData.HEAT_*)
 var heat_peak := 0.0             # hottest module, %
 var heat_hottest: Dictionary = {}
@@ -310,7 +314,7 @@ func _refresh_caps() -> void:
 
 # ------------------------------------------------------------------ physics
 func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
-	if wreck:
+	if wreck or dormant:
 		return
 	var dt := state.step
 	var basis := state.transform.basis
@@ -520,6 +524,8 @@ func _refresh_heat_summary() -> void:
 
 
 func _physics_process(delta: float) -> void:
+	if dormant:
+		return
 	if wreck:
 		return
 	_update_barrels(delta)

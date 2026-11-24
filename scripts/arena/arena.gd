@@ -32,6 +32,14 @@ var sel_weapons: Array = []   # ids of the selected weapon units (Turret Bays / 
 var order_p := {}          # parameters of the active order
 var facing := {"mode": "auto"}   # facing while moving: auto (travel), lock (fixed direction), point
 var _wp_drag := 0          # 0 none, 1 dragging on the XZ plane, 2 dragging altitude
+var ws: WorldSpace          # floating origin: absolute 64-bit positions, recentring
+var map_def: Dictionary = {}
+var streamer: MapStreamer
+var backdrop: FarBackdrop
+var sun: DirectionalLight3D
+var _map_t := 0.0
+var _far_t := 0.0
+var _edge_msg_t := 0.0
 
 
 func _ready() -> void:
@@ -41,6 +49,11 @@ func _ready() -> void:
 	ruleset = String(s.get("ruleset", "tdm"))
 	kill_limit = int(s.get("kill_limit", 30 if ruleset == "dm" else 10))
 	_tutorial = bool(s.get("tutorial", false))
+	map_def = MapDefs.get_def(String(s.get("map", "range")))
+	ws = WorldSpace.new()
+	ws.root = self
+	add_child(ws)
+	ws.shifted.connect(_on_world_shifted)
 	_build_world()
 	rig = CamRig.new()
 	add_child(rig)
@@ -62,6 +75,7 @@ func _ready() -> void:
 		if _tutorial:
 			hud.log_msg("[color=yellow]Tutorial[/color]: 1) thrust with W/A/S/D, 2) press X to toggle assist, 3) press T to lock the dummy, 4) hold LMB to fire, 5) read module HP at left.")
 	hud.say("Mode: %s" % ("Test Range" if mode == "sandbox" else "Freematch - " + _ruleset_name()), Color(1.0, 0.75, 0.3))
+	_init_map_content()
 
 
 # ------------------------------------------------------------------ world
@@ -73,10 +87,11 @@ func _build_world() -> void:
 	var sh := Shader.new()
 	sh.code = """
 shader_type sky;
+uniform vec3 tint = vec3(0.004, 0.005, 0.011);
 float hash(vec3 p){ p = fract(p*0.3183099+.1); p*=17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }
 void sky(){
 	vec3 d = normalize(EYEDIR);
-	vec3 col = vec3(0.004,0.005,0.011);
+	vec3 col = tint;
 	vec3 g = floor(d*520.0);
 	float h = hash(g);
 	col += vec3(step(0.9988, h) * (0.4 + 0.6*hash(g+7.1)));
@@ -84,50 +99,111 @@ void sky(){
 }
 """
 	sm.shader = sh
+	var msky: Dictionary = map_def["sky"]
+	var tc: Color = msky["tint"]
+	sm.set_shader_parameter("tint", Vector3(tc.r, tc.g, tc.b))
 	sky.sky_material = sm
 	env.sky = sky
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color = Color(0.25, 0.28, 0.38)
+	env.ambient_light_color = msky["ambient"]
 	env.ambient_light_energy = 0.6
+	if float(msky["fog"]) > 0.0:
+		env.fog_enabled = true
+		env.fog_density = float(msky["fog"])
+		env.fog_light_color = msky["fog_color"]
+		env.fog_sky_affect = 0.0
 	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
 	env.glow_enabled = true
 	var we := WorldEnvironment.new()
 	we.environment = env
 	add_child(we)
-	var sun := DirectionalLight3D.new()
+	sun = DirectionalLight3D.new()
 	sun.rotation_degrees = Vector3(-35, 40, 0)
-	sun.light_energy = 1.6
+	sun.light_energy = float(msky["sun_energy"])
+	sun.light_color = msky["sun_color"]
 	sun.shadow_enabled = true
-	sun.directional_shadow_max_distance = 600.0
+	sun.directional_shadow_max_distance = 1500.0
 	add_child(sun)
-	var rng := RandomNumberGenerator.new()
-	rng.seed = 7
-	var rock_mat := StandardMaterial3D.new()
-	rock_mat.albedo_color = Color(0.32, 0.29, 0.27)
-	rock_mat.roughness = 1.0
-	for i in 45:
-		var body := StaticBody3D.new()
-		var r := rng.randf_range(15.0, 90.0)
-		var pos := Vector3(rng.randf_range(-3000, 3000), rng.randf_range(-600, 600), rng.randf_range(-3000, 3000))
-		if pos.length() < 250.0:
-			pos += pos.normalized() * 400.0
-		var mi := MeshInstance3D.new()
-		var sp := SphereMesh.new()
-		sp.radius = r
-		sp.height = r * 2.0
-		sp.radial_segments = 14
-		sp.rings = 8
-		mi.mesh = sp
-		mi.material_override = rock_mat
-		mi.scale = Vector3(rng.randf_range(0.7, 1.4), rng.randf_range(0.6, 1.1), rng.randf_range(0.7, 1.4))
-		body.add_child(mi)
-		var cs := CollisionShape3D.new()
-		var ss := SphereShape3D.new()
-		ss.radius = r * 0.85
-		cs.shape = ss
-		body.add_child(cs)
-		body.position = pos
-		add_child(body)
+	streamer = MapStreamer.new()
+	add_child(streamer)
+	streamer.setup(ws, map_def)
+
+
+# ------------------------------------------------------------------ big world
+func _spawn_dist() -> float:
+	return MapDefs.spawn_dist(map_def)
+
+
+## Everything that needs the player and the camera to exist: first chunks, far bodies.
+func _init_map_content() -> void:
+	backdrop = FarBackdrop.new()
+	add_child(backdrop)
+	backdrop.setup(ws, map_def, rig.cam)
+	var focus := ws.abs_of(player) if player != null else ws.to_abs(Vector3.ZERO)
+	streamer.update(focus, 100000)
+	backdrop.update()
+	_update_sun()
+
+
+func _update_sun() -> void:
+	if backdrop != null and sun != null and backdrop.sun_dir.length() > 0.5:
+		sun.global_transform = Transform3D(Basis.looking_at(-backdrop.sun_dir, Vector3.UP), Vector3.ZERO)
+
+
+## Floating origin, streaming of the map, far ships, edge of the map. Called every physics frame.
+func _map_tick(delta: float) -> void:
+	if player == null or not is_instance_valid(player) or ws == null:
+		return
+	if not player.dormant:
+		ws.check_rebase(player.global_position)
+	_map_t += delta
+	if _map_t >= 0.25:
+		_map_t = 0.0
+		streamer.update(ws.abs_of(player), 2)
+		_update_sun()
+	_far_t += delta
+	if _far_t >= 0.5:
+		var dt := _far_t
+		_far_t = 0.0
+		for b in bots:
+			if b.ship.dormant and b.ship.alive:
+				b.ship.far_goal = ws.abs_of(player)
+		FarSim.step(get_tree().get_nodes_in_group("ships"), ws, player, dt, func(sh: Ship): return sh != _dummy and sh != player)
+	_enforce_bounds(delta)
+
+
+## The map is a cube; past its faces ships are pushed back towards the middle.
+func _enforce_bounds(delta: float) -> void:
+	var half := MapDefs.half_extent(map_def)
+	_edge_msg_t -= delta
+	for n in get_tree().get_nodes_in_group("ships"):
+		var sh := n as Ship
+		if sh == null or sh.dormant or not sh.alive:
+			continue
+		var a := ws.abs_of(sh)
+		var out := WorldSpace.outside_amount(a, half)
+		if out > 0.0:
+			var to_center := Vector3(-a.x, -a.y, -a.z).normalized()
+			sh.apply_central_force(to_center * sh.mass * minf(20.0 + out * 0.01, 400.0))
+			if sh == player and _edge_msg_t <= 0.0:
+				_edge_msg_t = 4.0
+				hud.say("Leaving the combat area - turn back", Color(1.0, 0.5, 0.25))
+
+
+## The origin moved by `delta`: every point the arena remembers moves with it.
+func _on_world_shifted(delta: Vector3) -> void:
+	waypoint -= delta
+	for key in ["pos", "center", "point"]:
+		if order_p.has(key) and order_p[key] is Vector3:
+			order_p[key] = (order_p[key] as Vector3) - delta
+	if order_p.has("points"):
+		var pts: Array = order_p["points"]
+		for i in range(pts.size()):
+			pts[i] = (pts[i] as Vector3) - delta
+	if facing.has("point") and facing["point"] is Vector3:
+		facing["point"] = (facing["point"] as Vector3) - delta
+	if rig != null:
+		rig.map_focus -= delta
 
 
 func _spawn_ship(bp: Dictionary, team: int, pos: Vector3, dir: Vector3) -> Ship:
@@ -198,11 +274,11 @@ func _start_freematch() -> void:
 
 func _spawn_bot(team: int, lib: Array) -> void:
 	var bp: Dictionary = lib[randi() % lib.size()]
-	var z := 1300.0 if team == 0 else -1300.0
+	var z := _spawn_dist() if team == 0 else -_spawn_dist()
 	var pos := Vector3(randf_range(-250, 250), randf_range(-60, 60), z + randf_range(-150, 150))
 	if ruleset == "dm":
 		var ang := float(team) * TAU / maxf(float(int(Game.session.get("bots_enemy", 2))), 1.0)
-		pos = Vector3(cos(ang), randf_range(-0.1, 0.1), sin(ang)) * 1300.0
+		pos = Vector3(cos(ang), randf_range(-0.1, 0.1), sin(ang)) * _spawn_dist()
 	var dir := (Vector3.ZERO - pos).normalized() if ruleset == "dm" else Vector3(0, 0, -1.0 if team == 0 else 1.0)
 	var s := _spawn_ship(bp, team, pos, dir)
 	bots.append(Bot.new(s, "hunter"))
@@ -970,10 +1046,17 @@ func _apply_facing(cmd: Dictionary) -> void:
 				cmd["face"] = d.normalized()
 
 
+func _process(_delta: float) -> void:
+	if backdrop != null:
+		backdrop.update()
+
+
 func _physics_process(delta: float) -> void:
 	_t += delta
+	_map_tick(delta)
 	for b in bots:
-		b.update(delta)
+		if not b.ship.dormant:
+			b.update(delta)
 	if mode == "freematch" and respawn_t > 0.0 and player != null and not player.alive:
 		respawn_t -= delta
 		hud.respawn_lbl.text = "Ship destroyed. Respawn in %d s" % ceili(maxf(respawn_t, 0.0)) if respawn_t > 0.0 else "Ready - pick a ship and respawn"
