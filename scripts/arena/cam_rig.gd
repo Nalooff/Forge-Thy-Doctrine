@@ -30,7 +30,7 @@ func _ready() -> void:
 
 func follow(s: Ship) -> void:
 	ship = s
-	dist = clampf(float(s.stats["longest"]) * 2.4, 12.0, 20000.0)
+	dist = clampf(float(s.stats["longest"]) * 2.4, 12.0, 400000.0)
 
 
 func set_map_mode(on: bool) -> void:
@@ -66,7 +66,7 @@ func unhandled(event: InputEvent) -> void:
 			if event.button_index == MOUSE_BUTTON_WHEEL_UP:
 				map_dist = maxf(map_dist * 0.88, 60.0)
 			elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-				map_dist = minf(map_dist * 1.14, 30000.0)
+				map_dist = minf(map_dist * 1.14, maxf(30000.0, _ship_len() * 40.0))
 		return
 	if event is InputEventMouseMotion and Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
 		yaw -= event.relative.x * 0.005
@@ -75,7 +75,7 @@ func unhandled(event: InputEvent) -> void:
 		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
 			dist = maxf(dist * 0.9, 4.0)
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-			dist = minf(dist * 1.1, 60000.0)
+			dist = minf(dist * 1.1, maxf(60000.0, _ship_len() * 12.0))
 
 
 func cp_view() -> Dictionary:
@@ -89,9 +89,26 @@ func cp_view() -> Dictionary:
 	return {}
 
 
+func _ship_len() -> float:
+	return float(ship.stats["longest"]) if ship != null and is_instance_valid(ship) else 20.0
+
+
+## Near and far planes follow the view distance, so a 100 km ship and a 5 m fighter both draw without z-fighting
+## and without being clipped (far plane at least 40 km, near plane a thousandth of the distance to the ship).
+func _fit_planes() -> void:
+	var d := map_dist if (map_mode and not first_person) else dist
+	var want_far := clampf(maxf(40000.0, d * 6.0 + _ship_len() * 3.0), 40000.0, 5.0e7)
+	var want_near := clampf(d * 0.0015, 0.1, 3000.0)
+	if first_person:
+		want_near = 0.1
+	cam.far = lerpf(cam.far, want_far, 0.25) if absf(cam.far - want_far) > want_far * 0.02 else want_far
+	cam.near = lerpf(cam.near, want_near, 0.25) if absf(cam.near - want_near) > want_near * 0.02 else want_near
+
+
 func _process(delta: float) -> void:
 	if ship == null or not is_instance_valid(ship):
 		return
+	_fit_planes()
 	var t_basis := ship.global_transform.basis
 	if first_person:
 		var v := cp_view()
