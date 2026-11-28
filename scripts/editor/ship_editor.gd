@@ -54,6 +54,7 @@ var cam_dist := 40.0
 var hull_mi: MeshInstance3D
 var hull_mat: StandardMaterial3D
 var handle_root: Node3D
+var handles_shown := 0
 var mod_root: Node3D
 var line_mi: MeshInstance3D
 var line_mesh: ImmediateMesh
@@ -183,6 +184,7 @@ func _update_cam() -> void:
 		cam.size = cam_dist * 1.5
 	cam.near = maxf(cam_dist * 0.002, 0.01)
 	cam.far = cam_dist * 200.0
+	_update_handle_lod()
 
 
 func _auto_snap() -> void:
@@ -1269,25 +1271,47 @@ func _rebuild() -> void:
 		_fill_mod_list()
 
 
+const HANDLE_PX := 6.0            # handles are this many pixels wide whatever the ship size or the zoom
+const HANDLE_SPACING_PX := 16.0   # rings closer than this on screen are thinned out
+var handle_mm: MultiMesh
+var handle_vis := PackedByteArray()
+
+
+## Vertex handles of the hull. One MultiMesh, constant size on screen, and a level of detail (GDD ship creation):
+## far away or crowded, rings are thinned out and small rings keep only a few vertices, so the general shape stays
+## readable; up close every vertex shows.
 func _rebuild_handles() -> void:
-	for c in handle_root.get_children():
-		c.queue_free()
 	if step != "Hull":
+		if handle_mm != null:
+			handle_mm.instance_count = 0
+		handle_vis = PackedByteArray()
 		return
-	var hs := maxf(float(stats["longest"]) * 0.009, 0.05)
-	var sm := SphereMesh.new()
-	sm.radius = hs
-	sm.height = hs * 2.0
-	sm.radial_segments = 8
-	sm.rings = 4
 	var rings: Array = bp["rings"]
+	var n := rings.size() * ShipData.RING_PTS
+	if handle_mm == null:
+		var sm := SphereMesh.new()
+		sm.radius = 1.0
+		sm.height = 2.0
+		sm.radial_segments = 8
+		sm.rings = 4
+		handle_mm = MultiMesh.new()
+		handle_mm.transform_format = MultiMesh.TRANSFORM_3D
+		handle_mm.use_colors = true
+		handle_mm.mesh = sm
+		var mat := StandardMaterial3D.new()
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.no_depth_test = true
+		mat.vertex_color_use_as_albedo = true
+		var mmi := MultiMeshInstance3D.new()
+		mmi.multimesh = handle_mm
+		mmi.material_override = mat
+		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		mmi.extra_cull_margin = 1.0e7
+		handle_root.add_child(mmi)
+	if handle_mm.instance_count != n:
+		handle_mm.instance_count = n
 	for r in range(rings.size()):
 		for i in ShipData.RING_PTS:
-			var mi := MeshInstance3D.new()
-			mi.mesh = sm
-			var mat := StandardMaterial3D.new()
-			mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-			mat.no_depth_test = true
 			var col := Color(0.85, 0.85, 0.9)
 			if r == sel_ring:
 				col = Color(1.0, 0.6, 0.2)
@@ -1295,10 +1319,69 @@ func _rebuild_handles() -> void:
 					col = Color(1.0, 1.0, 0.2)
 				elif sel_vert >= 0 and mirror and ShipData.mirror_idx(sel_vert) == i:
 					col = Color(0.3, 1.0, 1.0)
-			mat.albedo_color = col
-			mi.material_override = mat
-			mi.position = ShipData.ring_vertex(rings[r], i)
-			handle_root.add_child(mi)
+			handle_mm.set_instance_color(r * ShipData.RING_PTS + i, col)
+	_update_handle_lod()
+
+
+func _world_per_pixel(at: Vector3) -> float:
+	var vh := maxf(get_viewport().get_visible_rect().size.y, 1.0)
+	if ortho:
+		return cam.size / vh
+	return 2.0 * cam.global_position.distance_to(at) * tan(deg_to_rad(cam.fov * 0.5)) / vh
+
+
+## Which handles are drawn, and how big. Called whenever the camera or the hull changes.
+func _update_handle_lod() -> void:
+	if handle_mm == null or step != "Hull":
+		return
+	var rings: Array = bp["rings"]
+	var np := ShipData.RING_PTS
+	var nr := rings.size()
+	var n := nr * np
+	if handle_mm.instance_count != n:
+		return
+	# how crowded are the rings on screen?
+	var min_gap := INF
+	var prev := Vector2.ZERO
+	for r in range(nr):
+		var c := ShipData.ring_center(rings[r])
+		var sp := cam.unproject_position(c) if not cam.is_position_behind(c) else Vector2(-1e6, -1e6)
+		if r > 0 and not cam.is_position_behind(c):
+			min_gap = minf(min_gap, sp.distance_to(prev))
+		prev = sp
+	var ring_stride := 1
+	if min_gap < HANDLE_SPACING_PX and min_gap > 0.0:
+		ring_stride = clampi(int(ceil(HANDLE_SPACING_PX / min_gap)), 1, nr)
+	handle_vis.resize(n)
+	var shown := 0
+	for r in range(nr):
+		var ring: Dictionary = rings[r]
+		var c := ShipData.ring_center(ring)
+		var show_ring := r % ring_stride == 0 or r == nr - 1 or r == sel_ring
+		# small rings on screen keep fewer vertices
+		var radius_px := 0.0
+		var cs := cam.unproject_position(c) if not cam.is_position_behind(c) else Vector2.ZERO
+		for i in np:
+			var wp := ShipData.ring_vertex(ring, i)
+			if not cam.is_position_behind(wp):
+				radius_px = maxf(radius_px, cam.unproject_position(wp).distance_to(cs))
+		var vstep := 1
+		if radius_px < 10.0:
+			vstep = 4
+		elif radius_px < 24.0:
+			vstep = 2
+		for i in np:
+			var idx := r * np + i
+			var wp2 := ShipData.ring_vertex(ring, i)
+			var vis := show_ring and not cam.is_position_behind(wp2) and (i % vstep == 0 or (r == sel_ring and (i == sel_vert or (mirror and sel_vert >= 0 and ShipData.mirror_idx(sel_vert) == i))))
+			handle_vis[idx] = 1 if vis else 0
+			if vis:
+				shown += 1
+				var sc := HANDLE_PX * 0.5 * _world_per_pixel(wp2)
+				handle_mm.set_instance_transform(idx, Transform3D(Basis.from_scale(Vector3(sc, sc, sc)), wp2))
+			else:
+				handle_mm.set_instance_transform(idx, Transform3D(Basis.from_scale(Vector3.ZERO), wp2))
+	handles_shown = shown
 
 
 func _type_color(t: String) -> Color:
@@ -1314,6 +1397,9 @@ func _rebuild_modules() -> void:
 	for i in issues:
 		if int(i["mod"]) >= 0:
 			bad[int(i["mod"])] = true
+	if (bp["modules"] as Array).size() > 48:
+		_rebuild_modules_batched(bad)
+		return
 	for m in bp["modules"]:
 		var mi := MeshInstance3D.new()
 		var bm := BoxMesh.new()
@@ -1331,6 +1417,36 @@ func _rebuild_modules() -> void:
 		mi.material_override = mat
 		mi.position = ShipData.v3(m["pos"])
 		mod_root.add_child(mi)
+
+
+## Many modules: one MultiMesh (a node per module costs too much on a ship with thousands).
+func _rebuild_modules_batched(bad: Dictionary) -> void:
+	var mods: Array = bp["modules"]
+	var bm := BoxMesh.new()
+	bm.size = Vector3.ONE
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_colors = true
+	mm.mesh = bm
+	mm.instance_count = mods.size()
+	for i in range(mods.size()):
+		var m: Dictionary = mods[i]
+		var col := _type_color(m["type"])
+		if bad.has(int(m["id"])):
+			col = col.lerp(Color(1, 0.1, 0.1), 0.6)
+		col.a = 0.75 if int(m["id"]) == sel_mod or int(m["id"]) == link_from else 0.5
+		if step == "Interior":
+			col.a = 0.22
+		mm.set_instance_transform(i, Transform3D(Basis.from_scale(ShipData.v3(m["size"])), ShipData.v3(m["pos"])))
+		mm.set_instance_color(i, col)
+	var mat := StandardMaterial3D.new()
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.vertex_color_use_as_albedo = true
+	var mmi := MultiMeshInstance3D.new()
+	mmi.multimesh = mm
+	mmi.material_override = mat
+	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mod_root.add_child(mmi)
 
 
 func _line(a: Vector3, b: Vector3, col: Color) -> void:
@@ -1921,6 +2037,9 @@ func _pick_handle() -> Vector2i:
 	var rings: Array = bp["rings"]
 	for r in range(rings.size()):
 		for i in ShipData.RING_PTS:
+			var hi := r * ShipData.RING_PTS + i
+			if hi < handle_vis.size() and handle_vis[hi] == 0:
+				continue
 			var wp := ShipData.ring_vertex(rings[r], i)
 			if cam.is_position_behind(wp):
 				continue

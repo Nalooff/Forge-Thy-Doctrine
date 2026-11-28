@@ -50,3 +50,5 @@ Last audit: 2026-11-20, against `docs/Forge_Thy_Doctrine.md` and the code in `sc
 - Maps: the 30+ maps and their effects (only one asteroid arena exists)
 - Scale range 5 m to 100,000 m with LOD vertex culling (snap/camera adapt, LOD culling not done)
 - Tutorial content, campaign, module creation, downloads
+
+- Large worlds, km-long ships, workshop scale (see docs/HANDOFF.md): floating origin + 64-bit positions, 39 maps streamed by chunks, far backdrop, dormant far ships, O(active) ship simulation with MultiMesh visuals, validation in 0.4 s for 3,000 modules, editor handles with level of detail. Tests: `world_test`, `scale_test`, `editor_scale_test`, `menu_test`, `bench_ship`

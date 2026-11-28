@@ -103,10 +103,40 @@ static func normalize(bp: Dictionary) -> Dictionary:
 
 
 static func get_module(bp: Dictionary, id: int) -> Dictionary:
-	for m in bp["modules"]:
+	var mods: Array = bp["modules"]
+	# ids are handed out in order, so the module is usually at index id - 1: O(1) instead of a scan
+	if id >= 1 and id <= mods.size() and int(mods[id - 1]["id"]) == id:
+		return mods[id - 1]
+	for m in mods:
 		if int(m["id"]) == id:
 			return m
 	return {}
+
+
+## Lookup tables for code that asks about many modules (validation of a big ship): {by_id, adj}.
+static func build_index(bp: Dictionary) -> Dictionary:
+	var by_id := {}
+	for m in bp["modules"]:
+		by_id[int(m["id"])] = m
+	var adj := {}
+	for l in bp["links"]:
+		var a := int(l[0])
+		var b := int(l[1])
+		if not adj.has(a):
+			adj[a] = []
+		if not adj.has(b):
+			adj[b] = []
+		(adj[a] as Array).append(b)
+		(adj[b] as Array).append(a)
+	return {"by_id": by_id, "adj": adj}
+
+
+static func linked_ids_idx(idx: Dictionary, id: int, of_type := "") -> Array:
+	var out: Array = []
+	for other in idx["adj"].get(id, []):
+		if of_type == "" or String((idx["by_id"].get(other, {}) as Dictionary).get("type", "")) == of_type:
+			out.append(other)
+	return out
 
 
 static func add_module(bp: Dictionary, type: String, pos: Vector3, size := Vector3.ZERO, dir := 0, weapon := "kinetic") -> int:
@@ -274,6 +304,19 @@ static func ring_pts_at(rings: Array, z: float) -> PackedVector2Array:
 
 static func hull_contains(rings: Array, p: Vector3) -> bool:
 	var poly := ring_pts_at(rings, p.z)
+	if poly.is_empty():
+		return false
+	return Geometry2D.is_point_in_polygon(Vector2(p.x, p.y), poly)
+
+
+## hull_contains with the cross-section of each altitude z remembered in `cache` (the corners of a box share two).
+static func hull_contains_cached(rings: Array, p: Vector3, cache: Dictionary) -> bool:
+	var poly: PackedVector2Array
+	if cache.has(p.z):
+		poly = cache[p.z]
+	else:
+		poly = ring_pts_at(rings, p.z)
+		cache[p.z] = poly
 	if poly.is_empty():
 		return false
 	return Geometry2D.is_point_in_polygon(Vector2(p.x, p.y), poly)
@@ -554,17 +597,18 @@ static func _corners(box: AABB) -> Array:
 	return out
 
 
-static func placement_ok(bp: Dictionary, m: Dictionary) -> String:
+static func placement_ok(bp: Dictionary, m: Dictionary, idx := {}) -> String:
 	var rings: Array = bp["rings"]
 	var def: Dictionary = MODULES[m["type"]]
 	var inside := 0
+	var zc := {}
 	for c in _corners(module_box(m)):
-		if hull_contains(rings, c):
+		if hull_contains_cached(rings, c, zc):
 			inside += 1
 	if def["kind"] == "internal":
 		return "" if inside == 8 else "must be fully inside the hull (Not Placeable Here)"
 	if m["type"] == "barrel":
-		for bid in linked_ids(bp, int(m["id"]), "turret_bay"):
+		for bid in (linked_ids_idx(idx, int(m["id"]), "turret_bay") if not idx.is_empty() else linked_ids(bp, int(m["id"]), "turret_bay")):
 			if touching(get_module(bp, int(bid)), m):
 				var dv0: Vector3 = DIRS[int(m["dir"])]
 				var half0 := v3(m["size"])[DIR_AXIS[int(m["dir"])]] * 0.5
@@ -583,6 +627,54 @@ static func placement_ok(bp: Dictionary, m: Dictionary) -> String:
 		if hull_contains(rings, fp):
 			return "its exposed face (nozzle / muzzle / viewport) is still inside the hull"
 	return ""
+
+
+## Index pairs [i, j] (i < j) of modules whose boxes overlap, through a spatial hash (not every pair).
+static func overlapping_pairs(mods: Array) -> Array:
+	var n := mods.size()
+	var out: Array = []
+	if n < 2:
+		return out
+	var boxes: Array = []
+	var ext := PackedFloat32Array()
+	for m in mods:
+		var b := module_box(m)
+		boxes.append(b)
+		ext.append(maxf(b.size.x, maxf(b.size.y, b.size.z)))
+	ext.sort()
+	var cell := maxf(ext[n / 2] * 2.0, 1.0)
+	var grid := {}
+	for i in range(n):
+		var b: AABB = boxes[i]
+		var lo := Vector3i(floori(b.position.x / cell), floori(b.position.y / cell), floori(b.position.z / cell))
+		var hi := Vector3i(floori(b.end.x / cell), floori(b.end.y / cell), floori(b.end.z / cell))
+		for x in range(lo.x, hi.x + 1):
+			for y in range(lo.y, hi.y + 1):
+				for z in range(lo.z, hi.z + 1):
+					var key := Vector3i(x, y, z)
+					if not grid.has(key):
+						grid[key] = []
+					(grid[key] as Array).append(i)
+	var seen := {}
+	var found: Array = []
+	for lst in grid.values():
+		var l: Array = lst
+		for a in range(l.size()):
+			for c in range(a + 1, l.size()):
+				var i := mini(int(l[a]), int(l[c]))
+				var j := maxi(int(l[a]), int(l[c]))
+				var k := i * n + j
+				if seen.has(k):
+					continue
+				seen[k] = true
+				if _overlap_allowed(mods[i]["type"], mods[j]["type"]):
+					continue
+				if (boxes[i] as AABB).grow(-0.01).intersects(boxes[j]):
+					found.append(k)
+	found.sort()
+	for k in found:
+		out.append([int(k) / n, int(k) % n])
+	return out
 
 
 static func _overlap_allowed(ta: String, tb: String) -> bool:
@@ -617,6 +709,7 @@ static func validate(bp: Dictionary, ctx := {}) -> Array:
 	if th < 0.02 or th > 2.0:
 		issues.append({"msg": "Hull thickness out of range", "mod": -1})
 	var counts := {}
+	var idx := build_index(bp)
 	for m in bp["modules"]:
 		counts[m["type"]] = int(counts.get(m["type"], 0)) + 1
 		var def: Dictionary = MODULES[m["type"]]
@@ -624,16 +717,14 @@ static func validate(bp: Dictionary, ctx := {}) -> Array:
 		var s := v3(m["size"])
 		if s.x < mn.x - 1e-4 or s.y < mn.y - 1e-4 or s.z < mn.z - 1e-4:
 			issues.append({"msg": "%s #%d is below its minimum size" % [def["label"], m["id"]], "mod": int(m["id"])})
-		var why := placement_ok(bp, m)
+		var why := placement_ok(bp, m, idx)
 		if why != "":
 			issues.append({"msg": "%s #%d %s" % [def["label"], m["id"], why], "mod": int(m["id"])})
 	var mods: Array = bp["modules"]
-	for i in range(mods.size()):
-		for j in range(i + 1, mods.size()):
-			if _overlap_allowed(mods[i]["type"], mods[j]["type"]):
-				continue
-			if module_box(mods[i]).grow(-0.01).intersects(module_box(mods[j])):
-				issues.append({"msg": "%s #%d overlaps %s #%d" % [MODULES[mods[i]["type"]]["label"], mods[i]["id"], MODULES[mods[j]["type"]]["label"], mods[j]["id"]], "mod": int(mods[i]["id"])})
+	for pr in overlapping_pairs(mods):
+		var mi: Dictionary = mods[int(pr[0])]
+		var mj: Dictionary = mods[int(pr[1])]
+		issues.append({"msg": "%s #%d overlaps %s #%d" % [MODULES[mi["type"]]["label"], mi["id"], MODULES[mj["type"]]["label"], mj["id"]], "mod": int(mi["id"])})
 	if int(counts.get("commander_post", 0)) == 0:
 		issues.append({"msg": "Needs at least one Commander Post", "mod": -1})
 	if int(counts.get("generator", 0)) == 0:
@@ -644,18 +735,18 @@ static func validate(bp: Dictionary, ctx := {}) -> Array:
 		var id := int(m["id"])
 		match m["type"]:
 			"thruster":
-				if thruster_engine(bp, id) < 0:
+				if linked_ids_idx(idx, id, "engine_room").is_empty():
 					issues.append({"msg": "Thruster #%d is not linked to an Engine Room" % id, "mod": id})
 			"barrel":
-				var bays := linked_ids(bp, id, "turret_bay")
-				var ctrls := linked_ids(bp, id, "turret_control")
+				var bays := linked_ids_idx(idx, id, "turret_bay")
+				var ctrls := linked_ids_idx(idx, id, "turret_control")
 				if bays.is_empty() and ctrls.is_empty():
 					issues.append({"msg": "Barrel #%d is not linked to a Turret Bay or Turret Control" % id, "mod": id})
 				for bid in bays:
 					if not touching(get_module(bp, int(bid)), m):
 						issues.append({"msg": "Barrel #%d must touch its Turret Bay #%d" % [id, bid], "mod": id})
 			"engine_room", "turret_bay", "turret_control":
-				if linked_ids(bp, id, "commander_post").is_empty():
+				if linked_ids_idx(idx, id, "commander_post").is_empty():
 					issues.append({"msg": "%s #%d has no Commander Post link" % [MODULES[m["type"]]["label"], id], "mod": id})
 	var st := compute_stats(bp)
 	if float(st["power_idle"]) > float(st["power_out"]):

@@ -337,16 +337,42 @@ func _ship_picker(parent: Control) -> OptionButton:
 	return pick
 
 
+## The map list of the design doc: 100 km up to 1,000,000 km. Returns {pick, ids}; ids[pick.selected] is the map id.
+func _map_picker(parent: Control, default_id: String) -> Dictionary:
+	var lbl := Label.new()
+	lbl.text = "Map"
+	parent.add_child(lbl)
+	var pick := OptionButton.new()
+	var ids: Array = []
+	for d in MapDefs.all():
+		pick.add_item("%s   (%s)" % [d["name"], MapDefs.size_label(d)])
+		ids.append(String(d["id"]))
+	pick.select(maxi(ids.find(default_id), 0))
+	parent.add_child(pick)
+	var desc := Label.new()
+	desc.autowrap_mode = TextServer.AUTOWRAP_WORD
+	desc.custom_minimum_size = Vector2(380, 0)
+	desc.add_theme_font_size_override("font_size", 10)
+	var show := func(i: int):
+		var d: Dictionary = MapDefs.get_def(String(ids[i]))
+		desc.text = "%s\nCube of %s per side. Everything outside the players is generated around them, so size costs nothing." % [d["desc"], MapDefs.size_label(d)]
+	pick.item_selected.connect(show)
+	show.call(pick.selected)
+	parent.add_child(desc)
+	return {"pick": pick, "ids": ids}
+
+
 func _sandbox_cfg(tut: bool) -> void:
 	var b := _info("Tutorial" if tut else "Sandbox - test range", "Choose your ship.")
 	var pick := _ship_picker(b)
+	var maps := _map_picker(b, "range")
 	var go := Button.new()
 	go.text = "Start"
 	go.pressed.connect(func():
 		var ships := Game.all_ships()
 		var e: Dictionary = ships[pick.selected]
 		Game.set_last_ship(e["name"], e["source"], e["path"])
-		Game.session = {"mode": "sandbox", "ship": e["bp"], "return_scene": "res://scenes/main_menu.tscn", "tutorial": tut}
+		Game.session = {"mode": "sandbox", "ship": e["bp"], "return_scene": "res://scenes/main_menu.tscn", "tutorial": tut, "map": String(maps["ids"][maps["pick"].selected])}
 		Game.goto_scene("res://scenes/arena.tscn"))
 	b.add_child(go)
 
@@ -354,6 +380,7 @@ func _sandbox_cfg(tut: bool) -> void:
 func _freematch_cfg() -> void:
 	var b := _info("Freematch", "Choose your ship and the rules.")
 	var pick := _ship_picker(b)
+	var maps := _map_picker(b, "range")
 	var rule := OptionButton.new()
 	for r in ["Team Deathmatch (respawns)", "Team Elimination (one life)", "Deathmatch (free for all)"]:
 		rule.add_item(r)
@@ -384,7 +411,7 @@ func _freematch_cfg() -> void:
 		Game.set_last_ship(e["name"], e["source"], e["path"])
 		var rs: String = ["tdm", "elim", "dm"][rule.selected]
 		Game.session = {"mode": "freematch", "ship": e["bp"], "return_scene": "res://scenes/main_menu.tscn", "ruleset": rs,
-			"bots_ally": int(spins["ally"].value), "bots_enemy": int(spins["enemy"].value), "kill_limit": int(spins["kills"].value)}
+			"bots_ally": int(spins["ally"].value), "bots_enemy": int(spins["enemy"].value), "kill_limit": int(spins["kills"].value), "map": String(maps["ids"][maps["pick"].selected])}
 		Game.goto_scene("res://scenes/arena.tscn"))
 	b.add_child(go)
 
